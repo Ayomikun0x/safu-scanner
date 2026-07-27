@@ -62,16 +62,18 @@ async function fetchJson(url) {
 
 async function checkContractVerification(address) {
   const data = await fetchJson(`${config.explorerApi}/smart-contracts/${address}`);
-  if (!data) return { verified: false, riskyFunctions: [], creator: null };
+  if (!data) return { verified: false, riskyFunctions: [] };
 
   const abiText = JSON.stringify(data.abi || []).toLowerCase();
   const riskyFunctions = RISKY_FUNCTION_KEYWORDS.filter((kw) => abiText.includes(kw));
 
-  return {
-    verified: true,
-    riskyFunctions,
-    creator: (data.creator_address_hash || null),
-  };
+  return { verified: true, riskyFunctions };
+}
+
+async function fetchDeployerAddress(address) {
+  const data = await fetchJson(`${config.explorerApi}/addresses/${address}`);
+  if (!data) return null;
+  return data.creator_address_hash || null;
 }
 
 async function findLpLockStatus(poolAddress, fromBlock) {
@@ -134,11 +136,12 @@ async function analyzeNewToken(newTokenAddress, baseTokenAddress, poolAddress, b
     ]);
 
   const verification = await checkContractVerification(newTokenAddress);
+  const creator = await fetchDeployerAddress(newTokenAddress);
 
   let creatorHoldingPct = null;
-  if (verification.creator) {
+  if (creator) {
     try {
-      const creatorBalance = await token.balanceOf(verification.creator);
+      const creatorBalance = await token.balanceOf(creator);
       if (totalSupply > 0n) {
         creatorHoldingPct = Number((creatorBalance * 10000n) / totalSupply) / 100;
       }
@@ -169,7 +172,7 @@ async function analyzeNewToken(newTokenAddress, baseTokenAddress, poolAddress, b
     baseLiquidity: baseLiquidityFormatted,
     verified: verification.verified,
     riskyFunctions: verification.riskyFunctions,
-    creator: verification.creator,
+    creator: creator,
     creatorHoldingPct,
     lpLockStatus: lpLock.status,
     lpOwner: lpLock.owner,
