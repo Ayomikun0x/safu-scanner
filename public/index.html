@@ -24,7 +24,7 @@
 
   <main>
     <div class="disclaimer">
-      This tool flags heuristic risk signals — verified source, deployer holdings, LP lock status.
+      This tool flags heuristic risk signals — verified source, top holder concentration, LP lock status.
       None of it is a guarantee. Locked liquidity can still be fee-farmed. Always size positions like you could lose them.
     </div>
 
@@ -40,7 +40,7 @@
 
       <section class="column">
         <div class="column-head">
-          <h2>SAFU <span class="column-sub">verified · &lt;5% deployer · LP not unlocked</span></h2>
+          <h2>SAFU <span class="column-sub">verified · no risky fns · &lt;5% top holder</span></h2>
           <span class="count-pill count-pill-green" id="safuCount">0</span>
         </div>
         <div class="card-list" id="safuList"></div>
