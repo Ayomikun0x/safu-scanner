@@ -108,10 +108,29 @@ async function checkContractVerification(address) {
   return { verified: true, riskyFunctions };
 }
 
-async function fetchDeployerAddress(address) {
-  const data = await fetchJson(`${config.explorerApi}/addresses/${address}`);
-  if (!data) return null;
-  return data.creator_address_hash || null;
+async function fetchTopHolderPct(tokenAddress, poolAddress) {
+  const data = await fetchJson(`${config.explorerApi}/tokens/${tokenAddress}/holders`);
+  if (!data || !Array.isArray(data.items)) return { pct: null, holder: null };
+
+  const excluded = new Set([
+    poolAddress.toLowerCase(),
+    "0x0000000000000000000000000000000000dead",
+    "0x0000000000000000000000000000000000000000",
+  ]);
+
+  for (const item of data.items) {
+    const holderAddress = (item.address?.hash || "").toLowerCase();
+    if (!holderAddress || excluded.has(holderAddress)) continue;
+
+    const pct = Number(item.percentage ?? item.token_id_percentage ?? null);
+    if (!Number.isNaN(pct) && pct !== null) {
+      return { pct, holder: holderAddress };
+    }
+    // Fallback if the API doesn't give a percentage directly.
+    return { pct: null, holder: holderAddress };
+  }
+
+  return { pct: null, holder: null };
 }
 
 async function findLpLockStatus(poolAddress, fromBlock) {
@@ -175,19 +194,7 @@ async function analyzeNewToken(newTokenAddress, baseTokenAddress, poolAddress, b
     ]);
 
   const verification = await checkContractVerification(newTokenAddress);
-  const creator = await fetchDeployerAddress(newTokenAddress);
-
-  let creatorHoldingPct = null;
-  if (creator) {
-    try {
-      const creatorBalance = await token.balanceOf(creator);
-      if (totalSupply > 0n) {
-        creatorHoldingPct = Number((creatorBalance * 10000n) / totalSupply) / 100;
-      }
-    } catch {
-      creatorHoldingPct = null;
-    }
-  }
+  const topHolder = await fetchTopHolderPct(newTokenAddress, poolAddress);
 
   const lpLock = await findLpLockStatus(poolAddress, blockNumber);
 
@@ -216,8 +223,8 @@ async function analyzeNewToken(newTokenAddress, baseTokenAddress, poolAddress, b
   const isSafu =
     verification.verified &&
     verification.riskyFunctions.length === 0 &&
-    creatorHoldingPct !== null &&
-    creatorHoldingPct < config.safuMaxDeployerPct;
+    topHolder.pct !== null &&
+    topHolder.pct < config.safuMaxDeployerPct;
 
   return {
     tokenAddress: newTokenAddress.toLowerCase(),
@@ -232,8 +239,8 @@ async function analyzeNewToken(newTokenAddress, baseTokenAddress, poolAddress, b
     marketCapUsd,
     verified: verification.verified,
     riskyFunctions: verification.riskyFunctions,
-    creator: creator,
-    creatorHoldingPct,
+    topHolderAddress: topHolder.holder,
+    topHolderPct: topHolder.pct,
     lpLockStatus: lpLock.status,
     lpOwner: lpLock.owner,
     isSafu,
