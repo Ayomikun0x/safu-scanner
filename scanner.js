@@ -245,24 +245,19 @@ async function analyzeNewToken(newTokenAddress, baseTokenAddress, poolAddress, b
 
 async function scanOnce() {
   const currentBlock = await provider.getBlockNumber();
-  let fromBlock = db.getLastScannedBlock();
+  // Always scan a fresh fixed window rather than relying on a persisted
+  // "last scanned block" -- simpler, and avoids depending on disk state
+  // surviving between requests on hosts with ephemeral storage.
+  const fromBlock = Math.max(0, currentBlock - config.initialLookbackBlocks);
 
-  if (!fromBlock) {
-    // First run: only look back a modest window so we don't hammer the RPC.
-    fromBlock = currentBlock - config.initialLookbackBlocks;
-  } else {
-    fromBlock = fromBlock + 1;
-  }
-
-  if (fromBlock > currentBlock) {
-    return { scanned: 0, newTokens: 0 };
-  }
-
-  console.log(`Scanning blocks ${fromBlock} -> ${currentBlock}`);
+  console.log(`Scanning blocks ${fromBlock} -> ${currentBlock} (${currentBlock - fromBlock} blocks)`);
   const filter = factory.filters.PoolCreated();
   const logs = await getLogsChunked(factory, filter, fromBlock, currentBlock);
+  console.log(`Found ${logs.length} pool(s) created in this window`);
 
   let newTokenCount = 0;
+  let skippedNotBasePair = 0;
+  let skippedLiquidity = 0;
 
   for (const log of logs) {
     const { token0, token1, pool } = log.args;
@@ -274,7 +269,10 @@ async function scanOnce() {
 
     // Only process pools where exactly one side is a known base asset
     // (i.e. a new token paired against ETH/WETH/USDG).
-    if (t0IsBase === t1IsBase) continue;
+    if (t0IsBase === t1IsBase) {
+      skippedNotBasePair += 1;
+      continue;
+    }
 
     const newToken = t0IsBase ? t1 : t0;
     const baseToken = t0IsBase ? t0 : t1;
@@ -283,6 +281,7 @@ async function scanOnce() {
       const record = await analyzeNewToken(newToken, baseToken, pool, log.blockNumber);
 
       if (record.baseLiquidity < config.minLiquidityEth) {
+        skippedLiquidity += 1;
         continue; // too thin to matter
       }
 
@@ -294,7 +293,11 @@ async function scanOnce() {
     }
   }
 
-  db.setLastScannedBlock(currentBlock);
+  console.log(
+    `Scan summary: ${logs.length} pools found, ${skippedNotBasePair} skipped (not paired with WETH/USDG), ` +
+    `${skippedLiquidity} skipped (below ${config.minLiquidityEth} ETH liquidity), ${newTokenCount} recorded`
+  );
+
   return { scanned: logs.length, newTokens: newTokenCount };
 }
 
