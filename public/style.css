@@ -330,6 +330,27 @@ main {
   margin-bottom: 10px;
 }
 
+.lp-owner-row {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--gray);
+  margin-bottom: 8px;
+}
+
+.lp-owner-row a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.lp-owner-row a:hover {
+  text-decoration: underline;
+}
+
+.lp-owner-hint {
+  color: var(--gray);
+  font-style: italic;
+}
+
 .card-links a {
   color: var(--accent);
   text-decoration: none;
