@@ -33,11 +33,11 @@ function riskyBadge(riskyFunctions) {
 }
 
 function holdingBadge(pct) {
-  if (pct === null || pct === undefined) return `<span class="badge badge-gray">Deployer: unknown</span>`;
+  if (pct === null || pct === undefined) return `<span class="badge badge-gray">Top holder: unknown</span>`;
   let cls = "badge-green";
   if (pct >= 20) cls = "badge-red";
   else if (pct >= 5) cls = "badge-amber";
-  return `<span class="badge ${cls}">Deployer: ${pct.toFixed(1)}%</span>`;
+  return `<span class="badge ${cls}">Top holder: ${pct.toFixed(1)}%</span>`;
 }
 
 function renderCard(t) {
@@ -58,7 +58,7 @@ function renderCard(t) {
       <div class="card-badges">
         ${verifiedBadge(t.verified)}
         ${riskyBadge(t.riskyFunctions)}
-        ${holdingBadge(t.creatorHoldingPct)}
+        ${holdingBadge(t.topHolderPct)}
         ${lpBadge(t.lpLockStatus)}
       </div>
       ${t.lpOwner ? `
