@@ -217,8 +217,7 @@ async function analyzeNewToken(newTokenAddress, baseTokenAddress, poolAddress, b
     verification.verified &&
     verification.riskyFunctions.length === 0 &&
     creatorHoldingPct !== null &&
-    creatorHoldingPct < config.safuMaxDeployerPct &&
-    lpLock.status !== "unlocked";
+    creatorHoldingPct < config.safuMaxDeployerPct;
 
   return {
     tokenAddress: newTokenAddress.toLowerCase(),
