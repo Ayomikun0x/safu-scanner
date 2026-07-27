@@ -257,7 +257,6 @@ async function scanOnce() {
 
   let newTokenCount = 0;
   let skippedNotBasePair = 0;
-  let skippedLiquidity = 0;
 
   for (const log of logs) {
     const { token0, token1, pool } = log.args;
@@ -280,11 +279,6 @@ async function scanOnce() {
     try {
       const record = await analyzeNewToken(newToken, baseToken, pool, log.blockNumber);
 
-      if (record.baseLiquidity < config.minLiquidityEth) {
-        skippedLiquidity += 1;
-        continue; // too thin to matter
-      }
-
       db.upsertToken(record);
       newTokenCount += 1;
       console.log(`New token recorded: ${record.symbol} (${record.tokenAddress})`);
@@ -295,7 +289,7 @@ async function scanOnce() {
 
   console.log(
     `Scan summary: ${logs.length} pools found, ${skippedNotBasePair} skipped (not paired with WETH/USDG), ` +
-    `${skippedLiquidity} skipped (below ${config.minLiquidityEth} ETH liquidity), ${newTokenCount} recorded`
+    `${newTokenCount} recorded`
   );
 
   return { scanned: logs.length, newTokens: newTokenCount };
