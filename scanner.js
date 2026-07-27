@@ -3,6 +3,44 @@ const config = require("./config");
 const { FACTORY_ABI, ERC20_ABI, POOL_ABI, POSITION_MANAGER_ABI } = require("./abis");
 const db = require("./db");
 
+// Simple in-memory cache for ETH/USD so we don't hit the price API on every token.
+let ethPriceCache = { value: null, fetchedAt: 0 };
+const ETH_PRICE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+async function getEthUsdPrice() {
+  const now = Date.now();
+  if (ethPriceCache.value && now - ethPriceCache.fetchedAt < ETH_PRICE_TTL_MS) {
+    return ethPriceCache.value;
+  }
+  try {
+    const res = await fetch(
+      "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd"
+    );
+    const data = await res.json();
+    const price = data?.ethereum?.usd;
+    if (price) {
+      ethPriceCache = { value: price, fetchedAt: now };
+      return price;
+    }
+  } catch (err) {
+    console.error("ETH price fetch failed:", err.message);
+  }
+  return ethPriceCache.value; // fall back to stale cache if the fetch failed
+}
+
+// Stablecoins we treat as ~$1 directly, so we don't need a price lookup for them.
+const USD_STABLE_BASES = new Set([
+  "0x5fc5360d0400a0fd4f2af552add042d716f1d168", // USDG
+]);
+
+function formatCompactUsd(value) {
+  if (value === null || value === undefined || Number.isNaN(value)) return null;
+  if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(2)}M`;
+  if (value >= 1_000) return `$${(value / 1_000).toFixed(1)}K`;
+  if (value >= 1) return `$${value.toFixed(2)}`;
+  return `$${value.toFixed(6)}`;
+}
+
 const provider = new ethers.JsonRpcProvider(config.rpcUrl, config.chainId, {
   staticNetwork: true,
 });
@@ -125,7 +163,7 @@ async function analyzeNewToken(newTokenAddress, baseTokenAddress, poolAddress, b
   const baseToken = new ethers.Contract(baseTokenAddress, ERC20_ABI, provider);
   const pool = new ethers.Contract(poolAddress, POOL_ABI, provider);
 
-  const [name, symbol, decimals, totalSupply, baseBalanceInPool, baseSymbol] =
+  const [name, symbol, decimals, totalSupply, baseBalanceInPool, baseSymbol, newTokenBalanceInPool] =
     await Promise.all([
       token.name().catch(() => "Unknown"),
       token.symbol().catch(() => "???"),
@@ -133,6 +171,7 @@ async function analyzeNewToken(newTokenAddress, baseTokenAddress, poolAddress, b
       token.totalSupply().catch(() => 0n),
       baseToken.balanceOf(poolAddress).catch(() => 0n),
       baseToken.symbol().catch(() => "?"),
+      token.balanceOf(poolAddress).catch(() => 0n),
     ]);
 
   const verification = await checkContractVerification(newTokenAddress);
@@ -153,6 +192,26 @@ async function analyzeNewToken(newTokenAddress, baseTokenAddress, poolAddress, b
   const lpLock = await findLpLockStatus(poolAddress, blockNumber);
 
   const baseLiquidityFormatted = Number(ethers.formatUnits(baseBalanceInPool, 18));
+  const newTokenReserveFormatted = Number(ethers.formatUnits(newTokenBalanceInPool, decimals));
+  const totalSupplyFormatted = Number(ethers.formatUnits(totalSupply, decimals));
+
+  let priceUsd = null;
+  let marketCapUsd = null;
+
+  if (newTokenReserveFormatted > 0) {
+    const priceInBase = baseLiquidityFormatted / newTokenReserveFormatted;
+
+    if (USD_STABLE_BASES.has(baseTokenAddress.toLowerCase())) {
+      priceUsd = priceInBase;
+    } else {
+      const ethUsd = await getEthUsdPrice();
+      if (ethUsd) priceUsd = priceInBase * ethUsd;
+    }
+
+    if (priceUsd !== null) {
+      marketCapUsd = priceUsd * totalSupplyFormatted;
+    }
+  }
 
   const isSafu =
     verification.verified &&
@@ -170,6 +229,8 @@ async function analyzeNewToken(newTokenAddress, baseTokenAddress, poolAddress, b
     poolAddress: poolAddress.toLowerCase(),
     baseSymbol,
     baseLiquidity: baseLiquidityFormatted,
+    priceUsd,
+    marketCapUsd,
     verified: verification.verified,
     riskyFunctions: verification.riskyFunctions,
     creator: creator,
@@ -188,7 +249,7 @@ async function scanOnce() {
 
   if (!fromBlock) {
     // First run: only look back a modest window so we don't hammer the RPC.
-    fromBlock = currentBlock - 5000;
+    fromBlock = currentBlock - config.initialLookbackBlocks;
   } else {
     fromBlock = fromBlock + 1;
   }

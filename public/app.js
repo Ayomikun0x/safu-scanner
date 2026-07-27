@@ -1,5 +1,13 @@
 const EXPLORER_BASE = "https://robinhoodchain.blockscout.com/address/";
 
+function formatCompactUsd(value) {
+  if (value === null || value === undefined) return "—";
+  if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(2)}M`;
+  if (value >= 1_000) return `$${(value / 1_000).toFixed(1)}K`;
+  if (value >= 1) return `$${value.toFixed(2)}`;
+  return `$${value.toFixed(6)}`;
+}
+
 function lpBadge(status) {
   const map = {
     burned: ["badge-green", "Burned"],
@@ -38,6 +46,10 @@ function renderCard(t) {
       <div class="card-top">
         <span><span class="token-name">${t.name}</span><span class="token-symbol">${t.symbol}</span></span>
         <span class="token-liq">${t.baseLiquidity.toFixed(3)} ${t.baseSymbol}</span>
+      </div>
+      <div class="card-stats-row">
+        <span class="stat-item">MC <strong>${formatCompactUsd(t.marketCapUsd)}</strong></span>
+        <span class="stat-item">Price <strong>${formatCompactUsd(t.priceUsd)}</strong></span>
       </div>
       <div class="card-addr-row">
         <span class="token-addr">${t.tokenAddress}</span>

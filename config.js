@@ -9,6 +9,11 @@ module.exports = {
   scanIntervalMinutes: Number(process.env.SCAN_INTERVAL_MINUTES || 5),
   minLiquidityEth: Number(process.env.MIN_LIQUIDITY_ETH || 0.5),
 
+  // Robinhood Chain produces blocks roughly every 0.1s, so block counts here go
+  // much further than on slower chains. Default covers ~90 minutes of history
+  // on a fresh start (no previously stored scan position).
+  initialLookbackBlocks: Number(process.env.INITIAL_LOOKBACK_BLOCKS || 54000),
+
   // A token counts as "SAFU" (shown on the filtered side) only if all of these hold:
   // - contract source is verified
   // - no risky functions (mint/blacklist/pause/etc.) found
