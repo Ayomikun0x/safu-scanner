@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SAFU Scanner — Sign in</title>
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body class="login-body">
+  <div class="login-card">
+    <div class="login-mark">◈</div>
+    <h1>SAFU Scanner</h1>
+    <p class="login-sub">Robinhood Chain new-token watch</p>
+    <form method="POST" action="/login">
+      <input type="password" name="password" placeholder="Password" autofocus required />
+      <button type="submit">Enter</button>
+    </form>
+    <p class="login-error" id="loginError" style="display:none;">Wrong password. Try again.</p>
+  </div>
+  <script>
+    if (new URLSearchParams(window.location.search).get("error")) {
+      document.getElementById("loginError").style.display = "block";
+    }
+  </script>
+</body>
+</html>

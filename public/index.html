@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SAFU Scanner — Robinhood Chain</title>
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">◈</span>
+      <div>
+        <h1>SAFU Scanner</h1>
+        <p class="subtitle">New token launches · Robinhood Chain</p>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <span id="lastUpdated" class="last-updated">—</span>
+      <button id="refreshBtn" class="btn-primary">Rescan now</button>
+      <form method="POST" action="/logout"><button class="btn-ghost" type="submit">Log out</button></form>
+    </div>
+  </header>
+
+  <main>
+    <div class="disclaimer">
+      This tool flags heuristic risk signals — verified source, deployer holdings, LP lock status.
+      None of it is a guarantee. Locked liquidity can still be fee-farmed. Always size positions like you could lose them.
+    </div>
+
+    <div class="board">
+      <section class="column">
+        <div class="column-head">
+          <h2>All launches</h2>
+          <span class="count-pill" id="allCount">0</span>
+        </div>
+        <div class="card-list" id="allList"></div>
+        <p class="column-empty" id="allEmpty" style="display:none;">Nothing scanned yet.</p>
+      </section>
+
+      <section class="column">
+        <div class="column-head">
+          <h2>SAFU <span class="column-sub">verified · &lt;5% deployer · LP not unlocked</span></h2>
+          <span class="count-pill count-pill-green" id="safuCount">0</span>
+        </div>
+        <div class="card-list" id="safuList"></div>
+        <p class="column-empty" id="safuEmpty" style="display:none;">None have passed the filter yet.</p>
+      </section>
+    </div>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
