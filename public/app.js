@@ -61,6 +61,11 @@ function renderCard(t) {
         ${holdingBadge(t.creatorHoldingPct)}
         ${lpBadge(t.lpLockStatus)}
       </div>
+      ${t.lpOwner ? `
+      <div class="lp-owner-row">
+        LP holder: <a href="${EXPLORER_BASE}${t.lpOwner}" target="_blank" rel="noopener">${t.lpOwner.slice(0,6)}…${t.lpOwner.slice(-4)}</a>
+        <span class="lp-owner-hint">— check if this is a wallet or a locker contract</span>
+      </div>` : ""}
       <div class="card-links">
         <a href="${EXPLORER_BASE}${t.tokenAddress}" target="_blank" rel="noopener">Explorer</a>
         <a href="https://app.uniswap.org/explore/pools/robinhoodchain/${t.poolAddress}" target="_blank" rel="noopener">Pool</a>
