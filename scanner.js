@@ -224,7 +224,8 @@ async function analyzeNewToken(newTokenAddress, baseTokenAddress, poolAddress, b
     verification.verified &&
     verification.riskyFunctions.length === 0 &&
     topHolder.pct !== null &&
-    topHolder.pct < config.safuMaxDeployerPct;
+    topHolder.pct < config.safuMaxDeployerPct &&
+    baseLiquidityFormatted >= config.safuMinLiquidityEth;
 
   return {
     tokenAddress: newTokenAddress.toLowerCase(),
