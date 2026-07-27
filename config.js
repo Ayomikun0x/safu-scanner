@@ -19,7 +19,11 @@ module.exports = {
   // - no risky functions (mint/blacklist/pause/etc.) found
   // - deployer wallet holds less than this % of supply
   // - LP status is anything except "unlocked" (burned/locked/unknown all pass)
-  safuMaxDeployerPct: Number(process.env.SAFU_MAX_DEPLOYER_PCT || 5),
+ safuMaxDeployerPct: Number(process.env.SAFU_MAX_DEPLOYER_PCT || 5),
+
+  // Minimum liquidity (in the base asset, e.g. WETH) for a token to count as
+  // SAFU. "All launches" still shows everything regardless of this value.
+  safuMinLiquidityEth: Number(process.env.SAFU_MIN_LIQUIDITY_ETH || 1),
   dashboardPassword: process.env.DASHBOARD_PASSWORD || "change-me-please",
   sessionSecret: process.env.SESSION_SECRET || "insecure-dev-secret",
   port: Number(process.env.PORT || 3000),
