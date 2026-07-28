@@ -26,18 +26,20 @@ function getAll() {
 
 function upsertToken(record) {
   const data = load();
-  data.tokens[record.tokenAddress] = record;
+  const key = `${record.chain}:${record.tokenAddress}`;
+  data.tokens[key] = record;
   save(data);
 }
 
-function getLastScannedBlock() {
+function getLastScannedBlock(networkKey) {
   const data = load();
-  return data.lastScannedBlock;
+  return (data.lastScanned && data.lastScanned[networkKey]) || null;
 }
 
-function setLastScannedBlock(blockNumber) {
+function setLastScannedBlock(networkKey, blockNumber) {
   const data = load();
-  data.lastScannedBlock = blockNumber;
+  if (!data.lastScanned) data.lastScanned = {};
+  data.lastScanned[networkKey] = blockNumber;
   save(data);
 }
 
