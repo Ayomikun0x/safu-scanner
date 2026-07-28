@@ -32,6 +32,17 @@
       <section class="column">
         <div class="column-head">
           <h2>All launches</h2>
+          <div class="column-controls">
+            <label class="toggle-label">
+              <input type="checkbox" id="hideSpamToggle" />
+              Hide dust
+            </label>
+            <select id="sortSelect" class="sort-select">
+              <option value="newest">Newest</option>
+              <option value="liquidity">Liquidity</option>
+              <option value="mcap">Market cap</option>
+            </select>
+          </div>
           <span class="count-pill" id="allCount">0</span>
         </div>
         <div class="card-list" id="allList"></div>
@@ -40,7 +51,7 @@
 
       <section class="column">
         <div class="column-head">
-         <h2>SAFU <span class="column-sub">verified · no risky fns · &lt;5% top holder · 1+ WETH liquidity</span></h2>
+          <h2>SAFU <span class="column-sub">verified · no risky fns · &lt;5% top holder · 1+ WETH liquidity</span></h2>
           <span class="count-pill count-pill-green" id="safuCount">0</span>
         </div>
         <div class="card-list" id="safuList"></div>
