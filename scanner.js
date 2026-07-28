@@ -2,10 +2,11 @@ const { ethers } = require("ethers");
 const config = require("./config");
 const { FACTORY_ABI, ERC20_ABI, POOL_ABI, POSITION_MANAGER_ABI } = require("./abis");
 const db = require("./db");
+const blockscout = require("./explorers/blockscout");
+const etherscan = require("./explorers/etherscan");
 
-// Simple in-memory cache for ETH/USD so we don't hit the price API on every token.
 let ethPriceCache = { value: null, fetchedAt: 0 };
-const ETH_PRICE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const ETH_PRICE_TTL_MS = 5 * 60 * 1000;
 
 async function getEthUsdPrice() {
   const now = Date.now();
@@ -25,13 +26,8 @@ async function getEthUsdPrice() {
   } catch (err) {
     console.error("ETH price fetch failed:", err.message);
   }
-  return ethPriceCache.value; // fall back to stale cache if the fetch failed
+  return ethPriceCache.value;
 }
-
-// Stablecoins we treat as ~$1 directly, so we don't need a price lookup for them.
-const USD_STABLE_BASES = new Set([
-  "0x5fc5360d0400a0fd4f2af552add042d716f1d168", // USDG
-]);
 
 function formatCompactUsd(value) {
   if (value === null || value === undefined || Number.isNaN(value)) return null;
@@ -41,35 +37,15 @@ function formatCompactUsd(value) {
   return `$${value.toFixed(6)}`;
 }
 
-const provider = new ethers.JsonRpcProvider(config.rpcUrl, config.chainId, {
-  staticNetwork: true,
-});
-
-const factory = new ethers.Contract(config.factoryAddress, FACTORY_ABI, provider);
-const positionManager = new ethers.Contract(
-  config.positionManagerAddress,
-  POSITION_MANAGER_ABI,
-  provider
-);
-
-// Function name fragments that, if present in a verified contract's ABI,
-// mean the owner/deployer can do something that puts your funds at risk.
 const RISKY_FUNCTION_KEYWORDS = [
-  "mint",
-  "blacklist",
-  "blocklist",
-  "pause",
-  "freeze",
-  "setfee",
-  "excludefromfee",
-  "setmaxtx",
-  "setmaxwallet",
-  "rescuetoken",
-  "withdrawtoken",
-  "setrouter",
+  "mint", "blacklist", "blocklist", "pause", "freeze", "setfee",
+  "excludefromfee", "setmaxtx", "setmaxwallet", "rescuetoken",
+  "withdrawtoken", "setrouter",
 ];
 
-// Chunk eth_getLogs calls so we don't blow past provider block-range limits.
+const EIP1967_IMPLEMENTATION_SLOT =
+  "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bb";
+
 const LOG_CHUNK_SIZE = 2000;
 
 async function getLogsChunked(contract, eventFilter, fromBlock, toBlock) {
@@ -88,54 +64,53 @@ async function getLogsChunked(contract, eventFilter, fromBlock, toBlock) {
   return allLogs;
 }
 
-async function fetchJson(url) {
-  try {
-    const res = await fetch(url);
-    if (!res.ok) return null;
-    return await res.json();
-  } catch (err) {
-    return null;
-  }
+const networkContext = new Map();
+
+function getContext(network) {
+  if (networkContext.has(network.key)) return networkContext.get(network.key);
+
+  const provider = new ethers.JsonRpcProvider(network.rpcUrl, network.chainId, {
+    staticNetwork: true,
+  });
+  const factory = new ethers.Contract(network.factoryAddress, FACTORY_ABI, provider);
+  const positionManager = new ethers.Contract(
+    network.positionManagerAddress,
+    POSITION_MANAGER_ABI,
+    provider
+  );
+
+  const ctx = { provider, factory, positionManager };
+  networkContext.set(network.key, ctx);
+  return ctx;
 }
 
-async function checkContractVerification(address) {
-  const data = await fetchJson(`${config.explorerApi}/smart-contracts/${address}`);
-  if (!data) return { verified: false, riskyFunctions: [] };
+function getExplorerClient(network) {
+  return network.explorerType === "etherscan" ? etherscan : blockscout;
+}
 
-  const abiText = JSON.stringify(data.abi || []).toLowerCase();
-  const riskyFunctions = RISKY_FUNCTION_KEYWORDS.filter((kw) => abiText.includes(kw));
+async function checkContractVerification(network, address) {
+  const client = getExplorerClient(network);
+  const result = await client.checkContractVerification(network, address);
+  if (!result.verified) return { verified: false, riskyFunctions: [] };
 
+  const riskyFunctions = RISKY_FUNCTION_KEYWORDS.filter((kw) =>
+    (result.abiText || "").includes(kw)
+  );
   return { verified: true, riskyFunctions };
 }
 
-async function fetchTopHolderPct(tokenAddress, poolAddress) {
-  const data = await fetchJson(`${config.explorerApi}/tokens/${tokenAddress}/holders`);
-  if (!data || !Array.isArray(data.items)) return { pct: null, holder: null };
-
-  const excluded = new Set([
-    poolAddress.toLowerCase(),
-    "0x0000000000000000000000000000000000dead",
-    "0x0000000000000000000000000000000000000000",
-  ]);
-
-  for (const item of data.items) {
-    const holderAddress = (item.address?.hash || "").toLowerCase();
-    if (!holderAddress || excluded.has(holderAddress)) continue;
-
-    const pct = Number(item.percentage ?? item.token_id_percentage ?? null);
-    if (!Number.isNaN(pct) && pct !== null) {
-      return { pct, holder: holderAddress };
-    }
-    // Fallback if the API doesn't give a percentage directly.
-    return { pct: null, holder: holderAddress };
+async function checkIsProxy(network, address) {
+  try {
+    const { provider } = getContext(network);
+    const slotValue = await provider.getStorage(address, EIP1967_IMPLEMENTATION_SLOT);
+    return slotValue !== ethers.ZeroHash;
+  } catch (err) {
+    return false;
   }
-
-  return { pct: null, holder: null };
 }
 
-async function findLpLockStatus(poolAddress, fromBlock) {
-  // Look for NFT (LP position) mints shortly after pool creation, then
-  // check where that position NFT currently lives.
+async function findLpLockStatus(network, poolAddress, fromBlock) {
+  const { provider, positionManager } = getContext(network);
   try {
     const toBlock = fromBlock + 200;
     const mintFilter = positionManager.filters.Transfer(ethers.ZeroAddress, null, null);
@@ -149,7 +124,6 @@ async function findLpLockStatus(poolAddress, fromBlock) {
       } catch {
         continue;
       }
-      // Rough match: does this position reference tokens from our pool?
       const poolContract = new ethers.Contract(poolAddress, POOL_ABI, provider);
       const [poolToken0, poolToken1] = await Promise.all([
         poolContract.token0(),
@@ -166,7 +140,7 @@ async function findLpLockStatus(poolAddress, fromBlock) {
       if (config.burnAddresses.has(currentOwner)) {
         return { status: "burned", owner: currentOwner };
       }
-      if (config.knownLockerContracts.has(currentOwner)) {
+      if (network.knownLockerContracts.has(currentOwner)) {
         return { status: "locked", owner: currentOwner };
       }
       return { status: "unlocked", owner: currentOwner };
@@ -177,10 +151,10 @@ async function findLpLockStatus(poolAddress, fromBlock) {
   return { status: "unknown", owner: null };
 }
 
-async function analyzeNewToken(newTokenAddress, baseTokenAddress, poolAddress, blockNumber) {
+async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolAddress, blockNumber) {
+  const { provider } = getContext(network);
   const token = new ethers.Contract(newTokenAddress, ERC20_ABI, provider);
   const baseToken = new ethers.Contract(baseTokenAddress, ERC20_ABI, provider);
-  const pool = new ethers.Contract(poolAddress, POOL_ABI, provider);
 
   const [name, symbol, decimals, totalSupply, baseBalanceInPool, baseSymbol, newTokenBalanceInPool] =
     await Promise.all([
@@ -189,14 +163,17 @@ async function analyzeNewToken(newTokenAddress, baseTokenAddress, poolAddress, b
       token.decimals().catch(() => 18),
       token.totalSupply().catch(() => 0n),
       baseToken.balanceOf(poolAddress).catch(() => 0n),
-      baseToken.symbol().catch(() => "?"),
+      baseToken.symbol().catch(() => network.baseAssetSymbolFallback),
       token.balanceOf(poolAddress).catch(() => 0n),
     ]);
 
-  const verification = await checkContractVerification(newTokenAddress);
-  const topHolder = await fetchTopHolderPct(newTokenAddress, poolAddress);
+  const verification = await checkContractVerification(network, newTokenAddress);
+  const isProxy = await checkIsProxy(network, newTokenAddress);
 
-  const lpLock = await findLpLockStatus(poolAddress, blockNumber);
+  const client = getExplorerClient(network);
+  const topHolderRaw = await client.fetchTopHolderPct(network, newTokenAddress, poolAddress);
+
+  const lpLock = await findLpLockStatus(network, poolAddress, blockNumber);
 
   const baseLiquidityFormatted = Number(ethers.formatUnits(baseBalanceInPool, 18));
   const newTokenReserveFormatted = Number(ethers.formatUnits(newTokenBalanceInPool, decimals));
@@ -208,7 +185,7 @@ async function analyzeNewToken(newTokenAddress, baseTokenAddress, poolAddress, b
   if (newTokenReserveFormatted > 0) {
     const priceInBase = baseLiquidityFormatted / newTokenReserveFormatted;
 
-    if (USD_STABLE_BASES.has(baseTokenAddress.toLowerCase())) {
+    if (network.usdStableBases.has(baseTokenAddress.toLowerCase())) {
       priceUsd = priceInBase;
     } else {
       const ethUsd = await getEthUsdPrice();
@@ -223,11 +200,16 @@ async function analyzeNewToken(newTokenAddress, baseTokenAddress, poolAddress, b
   const isSafu =
     verification.verified &&
     verification.riskyFunctions.length === 0 &&
-    topHolder.pct !== null &&
-    topHolder.pct < config.safuMaxDeployerPct &&
+    !isProxy &&
+    topHolderRaw.pct !== null &&
+    topHolderRaw.pct < config.safuMaxDeployerPct &&
     baseLiquidityFormatted >= config.safuMinLiquidityEth;
 
   return {
+    chain: network.key,
+    chainLabel: network.label,
+    explorerAddressBase: network.explorerAddressBase,
+    uniswapPoolUrlBase: network.uniswapPoolUrlBase,
     tokenAddress: newTokenAddress.toLowerCase(),
     name,
     symbol,
@@ -240,8 +222,10 @@ async function analyzeNewToken(newTokenAddress, baseTokenAddress, poolAddress, b
     marketCapUsd,
     verified: verification.verified,
     riskyFunctions: verification.riskyFunctions,
-    topHolderAddress: topHolder.holder,
-    topHolderPct: topHolder.pct,
+    isProxy,
+    topHolderAddress: topHolderRaw.holder,
+    topHolderPct: topHolderRaw.pct,
+    topHolderDataAvailable: topHolderRaw.available !== false,
     lpLockStatus: lpLock.status,
     lpOwner: lpLock.owner,
     isSafu,
@@ -250,17 +234,17 @@ async function analyzeNewToken(newTokenAddress, baseTokenAddress, poolAddress, b
   };
 }
 
-async function scanOnce() {
+async function scanNetwork(network) {
+  const { provider, factory } = getContext(network);
   const currentBlock = await provider.getBlockNumber();
-  // Always scan a fresh fixed window rather than relying on a persisted
-  // "last scanned block" -- simpler, and avoids depending on disk state
-  // surviving between requests on hosts with ephemeral storage.
-  const fromBlock = Math.max(0, currentBlock - config.initialLookbackBlocks);
+  const fromBlock = Math.max(0, currentBlock - network.initialLookbackBlocks);
 
-  console.log(`Scanning blocks ${fromBlock} -> ${currentBlock} (${currentBlock - fromBlock} blocks)`);
+  console.log(
+    `[${network.label}] Scanning blocks ${fromBlock} -> ${currentBlock} (${currentBlock - fromBlock} blocks)`
+  );
   const filter = factory.filters.PoolCreated();
   const logs = await getLogsChunked(factory, filter, fromBlock, currentBlock);
-  console.log(`Found ${logs.length} pool(s) created in this window`);
+  console.log(`[${network.label}] Found ${logs.length} pool(s) created in this window`);
 
   let newTokenCount = 0;
   let skippedNotBasePair = 0;
@@ -270,11 +254,9 @@ async function scanOnce() {
     const t0 = token0.toLowerCase();
     const t1 = token1.toLowerCase();
 
-    const t0IsBase = config.knownBaseTokens.has(t0);
-    const t1IsBase = config.knownBaseTokens.has(t1);
+    const t0IsBase = network.knownBaseTokens.has(t0);
+    const t1IsBase = network.knownBaseTokens.has(t1);
 
-    // Only process pools where exactly one side is a known base asset
-    // (i.e. a new token paired against ETH/WETH/USDG).
     if (t0IsBase === t1IsBase) {
       skippedNotBasePair += 1;
       continue;
@@ -284,22 +266,39 @@ async function scanOnce() {
     const baseToken = t0IsBase ? t0 : t1;
 
     try {
-      const record = await analyzeNewToken(newToken, baseToken, pool, log.blockNumber);
-
+      const record = await analyzeNewToken(network, newToken, baseToken, pool, log.blockNumber);
       db.upsertToken(record);
       newTokenCount += 1;
-      console.log(`New token recorded: ${record.symbol} (${record.tokenAddress})`);
+      console.log(`[${network.label}] Recorded: ${record.symbol} (${record.tokenAddress})`);
     } catch (err) {
-      console.error(`Failed to analyze token ${newToken}:`, err.message);
+      console.error(`[${network.label}] Failed to analyze token ${newToken}:`, err.message);
     }
   }
 
   console.log(
-    `Scan summary: ${logs.length} pools found, ${skippedNotBasePair} skipped (not paired with WETH/USDG), ` +
+    `[${network.label}] Scan summary: ${logs.length} pools found, ${skippedNotBasePair} skipped (wrong pair), ` +
     `${newTokenCount} recorded`
   );
 
-  return { scanned: logs.length, newTokens: newTokenCount };
+  return { network: network.key, scanned: logs.length, newTokens: newTokenCount };
+}
+
+async function scanOnce() {
+  const results = [];
+  for (const network of config.networks) {
+    try {
+      const result = await scanNetwork(network);
+      results.push(result);
+    } catch (err) {
+      console.error(`[${network.label}] Network scan failed:`, err.message);
+      results.push({ network: network.key, scanned: 0, newTokens: 0, error: err.message });
+    }
+  }
+  return {
+    scanned: results.reduce((sum, r) => sum + r.scanned, 0),
+    newTokens: results.reduce((sum, r) => sum + r.newTokens, 0),
+    perNetwork: results,
+  };
 }
 
 module.exports = { scanOnce };
