@@ -237,7 +237,15 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
 async function scanNetwork(network) {
   const { provider, factory } = getContext(network);
   const currentBlock = await provider.getBlockNumber();
-  const fromBlock = Math.max(0, currentBlock - network.initialLookbackBlocks);
+
+  const lastScanned = db.getLastScannedBlock(network.key);
+  const fromBlock = lastScanned
+    ? lastScanned + 1
+    : Math.max(0, currentBlock - network.initialLookbackBlocks);
+
+  if (fromBlock > currentBlock) {
+    return { network: network.key, scanned: 0, newTokens: 0 };
+  }
 
   console.log(
     `[${network.label}] Scanning blocks ${fromBlock} -> ${currentBlock} (${currentBlock - fromBlock} blocks)`
@@ -249,6 +257,7 @@ async function scanNetwork(network) {
   let newTokenCount = 0;
   let skippedNotBasePair = 0;
 
+  const candidates = [];
   for (const log of logs) {
     const { token0, token1, pool } = log.args;
     const t0 = token0.toLowerCase();
@@ -262,18 +271,33 @@ async function scanNetwork(network) {
       continue;
     }
 
-    const newToken = t0IsBase ? t1 : t0;
-    const baseToken = t0IsBase ? t0 : t1;
-
-    try {
-      const record = await analyzeNewToken(network, newToken, baseToken, pool, log.blockNumber);
-      db.upsertToken(record);
-      newTokenCount += 1;
-      console.log(`[${network.label}] Recorded: ${record.symbol} (${record.tokenAddress})`);
-    } catch (err) {
-      console.error(`[${network.label}] Failed to analyze token ${newToken}:`, err.message);
-    }
+    candidates.push({
+      newToken: t0IsBase ? t1 : t0,
+      baseToken: t0IsBase ? t0 : t1,
+      pool,
+      blockNumber: log.blockNumber,
+    });
   }
+
+  const BATCH_SIZE = 8;
+  for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
+    const batch = candidates.slice(i, i + BATCH_SIZE);
+    const results = await Promise.allSettled(
+      batch.map((c) => analyzeNewToken(network, c.newToken, c.baseToken, c.pool, c.blockNumber))
+    );
+
+    results.forEach((result, idx) => {
+      if (result.status === "fulfilled") {
+        db.upsertToken(result.value);
+        newTokenCount += 1;
+        console.log(`[${network.label}] Recorded: ${result.value.symbol} (${result.value.tokenAddress})`);
+      } else {
+        console.error(`[${network.label}] Failed to analyze token ${batch[idx].newToken}:`, result.reason?.message);
+      }
+    });
+  }
+
+  db.setLastScannedBlock(network.key, currentBlock);
 
   console.log(
     `[${network.label}] Scan summary: ${logs.length} pools found, ${skippedNotBasePair} skipped (wrong pair), ` +
@@ -283,22 +307,34 @@ async function scanNetwork(network) {
   return { network: network.key, scanned: logs.length, newTokens: newTokenCount };
 }
 
+let scanInProgress = false;
+
 async function scanOnce() {
-  const results = [];
-  for (const network of config.networks) {
-    try {
-      const result = await scanNetwork(network);
-      results.push(result);
-    } catch (err) {
-      console.error(`[${network.label}] Network scan failed:`, err.message);
-      results.push({ network: network.key, scanned: 0, newTokens: 0, error: err.message });
-    }
+  if (scanInProgress) {
+    console.log("Scan already in progress, skipping this trigger.");
+    return { scanned: 0, newTokens: 0, skipped: true };
   }
-  return {
-    scanned: results.reduce((sum, r) => sum + r.scanned, 0),
-    newTokens: results.reduce((sum, r) => sum + r.newTokens, 0),
-    perNetwork: results,
-  };
+
+  scanInProgress = true;
+  try {
+    const results = [];
+    for (const network of config.networks) {
+      try {
+        const result = await scanNetwork(network);
+        results.push(result);
+      } catch (err) {
+        console.error(`[${network.label}] Network scan failed:`, err.message);
+        results.push({ network: network.key, scanned: 0, newTokens: 0, error: err.message });
+      }
+    }
+    return {
+      scanned: results.reduce((sum, r) => sum + r.scanned, 0),
+      newTokens: results.reduce((sum, r) => sum + r.newTokens, 0),
+      perNetwork: results,
+    };
+  } finally {
+    scanInProgress = false;
+  }
 }
 
 module.exports = { scanOnce };
