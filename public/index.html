@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>SAFU Scanner — Robinhood Chain</title>
+<title>SAFU Scanner</title>
 <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
@@ -12,7 +12,7 @@
       <span class="brand-mark">◈</span>
       <div>
         <h1>SAFU Scanner</h1>
-        <p class="subtitle">New token launches · Robinhood Chain</p>
+        <p class="subtitle">New token launches · multi-chain</p>
       </div>
     </div>
     <div class="topbar-actions">
@@ -26,38 +26,22 @@
     <div class="disclaimer">
       This tool flags heuristic risk signals — verified source, top holder concentration, LP lock status.
       None of it is a guarantee. Locked liquidity can still be fee-farmed. Always size positions like you could lose them.
+      Top-holder data isn't available on every chain's explorer — when it's missing, that's shown honestly instead of guessed.
     </div>
 
-    <div class="board">
-      <section class="column">
-        <div class="column-head">
-          <h2>All launches</h2>
-          <div class="column-controls">
-            <label class="toggle-label">
-              <input type="checkbox" id="hideSpamToggle" />
-              Hide dust
-            </label>
-            <select id="sortSelect" class="sort-select">
-              <option value="newest">Newest</option>
-              <option value="liquidity">Liquidity</option>
-              <option value="mcap">Market cap</option>
-            </select>
-          </div>
-          <span class="count-pill" id="allCount">0</span>
-        </div>
-        <div class="card-list" id="allList"></div>
-        <p class="column-empty" id="allEmpty" style="display:none;">Nothing scanned yet.</p>
-      </section>
-
-      <section class="column">
-        <div class="column-head">
-          <h2>SAFU <span class="column-sub">verified · no risky fns · &lt;5% top holder · 1+ WETH liquidity</span></h2>
-          <span class="count-pill count-pill-green" id="safuCount">0</span>
-        </div>
-        <div class="card-list" id="safuList"></div>
-        <p class="column-empty" id="safuEmpty" style="display:none;">None have passed the filter yet.</p>
-      </section>
+    <div class="global-controls">
+      <label class="toggle-label">
+        <input type="checkbox" id="hideSpamToggle" />
+        Hide dust
+      </label>
+      <select id="sortSelect" class="sort-select">
+        <option value="newest">Newest</option>
+        <option value="liquidity">Liquidity</option>
+        <option value="mcap">Market cap</option>
+      </select>
     </div>
+
+    <div id="chainSections"></div>
   </main>
 
   <script src="/static/app.js"></script>
