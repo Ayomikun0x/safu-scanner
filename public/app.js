@@ -1,4 +1,32 @@
 const EXPLORER_BASE = "https://robinhoodchain.blockscout.com/address/";
+const SEEN_KEY = "safu_scanner_seen_tokens";
+const DUST_THRESHOLD_ETH = 0.05;
+
+function formatAge(scannedAt) {
+  const seconds = Math.floor((Date.now() - scannedAt) / 1000);
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+function getSeenAddresses() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(SEEN_KEY) || "[]"));
+  } catch {
+    return new Set();
+  }
+}
+
+function saveSeenAddresses(addresses) {
+  try {
+    localStorage.setItem(SEEN_KEY, JSON.stringify([...addresses]));
+  } catch {
+    // ignore storage errors (e.g. private browsing)
+  }
+}
 
 function formatCompactUsd(value) {
   if (value === null || value === undefined) return "—";
@@ -40,16 +68,20 @@ function holdingBadge(pct) {
   return `<span class="badge ${cls}">Top holder: ${pct.toFixed(1)}%</span>`;
 }
 
-function renderCard(t) {
+function renderCard(t, isNew) {
   return `
     <div class="token-card ${t.isSafu ? "is-safu" : ""}">
       <div class="card-top">
-        <span><span class="token-name">${t.name}</span><span class="token-symbol">${t.symbol}</span></span>
+        <span>
+          <span class="token-name">${t.name}</span><span class="token-symbol">${t.symbol}</span>
+          ${isNew ? '<span class="new-badge">NEW</span>' : ""}
+        </span>
         <span class="token-liq">${t.baseLiquidity.toFixed(3)} ${t.baseSymbol}</span>
       </div>
       <div class="card-stats-row">
         <span class="stat-item">MC <strong>${formatCompactUsd(t.marketCapUsd)}</strong></span>
         <span class="stat-item">Price <strong>${formatCompactUsd(t.priceUsd)}</strong></span>
+        <span class="token-age">${formatAge(t.scannedAt)}</span>
       </div>
       <div class="card-addr-row">
         <span class="token-addr">${t.tokenAddress}</span>
@@ -118,11 +150,33 @@ async function loadTokens({ scanFirst } = {}) {
   document.getElementById("allCount").textContent = tokens.length;
   document.getElementById("safuCount").textContent = safuTokens.length;
 
-  allEmpty.style.display = tokens.length ? "none" : "block";
+  // Apply "hide dust" toggle
+  const hideSpam = document.getElementById("hideSpamToggle").checked;
+  let displayedTokens = hideSpam
+    ? tokens.filter((t) => t.baseLiquidity >= DUST_THRESHOLD_ETH)
+    : tokens;
+
+  // Apply sort order
+  const sortBy = document.getElementById("sortSelect").value;
+  displayedTokens = [...displayedTokens].sort((a, b) => {
+    if (sortBy === "liquidity") return b.baseLiquidity - a.baseLiquidity;
+    if (sortBy === "mcap") return (b.marketCapUsd || 0) - (a.marketCapUsd || 0);
+    return b.scannedAt - a.scannedAt; // newest first (default)
+  });
+
+  // Mark tokens not seen in a previous visit as NEW
+  const seen = getSeenAddresses();
+  const isNew = (t) => !seen.has(t.tokenAddress);
+
+  allEmpty.style.display = displayedTokens.length ? "none" : "block";
   safuEmpty.style.display = safuTokens.length ? "none" : "block";
 
-  allList.innerHTML = tokens.map(renderCard).join("");
-  safuList.innerHTML = safuTokens.map(renderCard).join("");
+  allList.innerHTML = displayedTokens.map((t) => renderCard(t, isNew(t))).join("");
+  safuList.innerHTML = safuTokens.map((t) => renderCard(t, isNew(t))).join("");
+
+  // After rendering, remember every token address we've now shown at least once
+  tokens.forEach((t) => seen.add(t.tokenAddress));
+  saveSeenAddresses(seen);
 
   attachCopyHandlers(allList);
   attachCopyHandlers(safuList);
@@ -144,6 +198,9 @@ document.getElementById("refreshBtn").addEventListener("click", async () => {
   btn.textContent = "Rescan now";
   btn.disabled = false;
 });
+
+document.getElementById("hideSpamToggle").addEventListener("change", () => loadTokens({ scanFirst: false }));
+document.getElementById("sortSelect").addEventListener("change", () => loadTokens({ scanFirst: false }));
 
 loadTokens({ scanFirst: true });
 setInterval(() => loadTokens({ scanFirst: false }), 60 * 1000);
