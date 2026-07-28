@@ -1,6 +1,6 @@
-const EXPLORER_BASE = "https://robinhoodchain.blockscout.com/address/";
 const SEEN_KEY = "safu_scanner_seen_tokens";
 const DUST_THRESHOLD_ETH = 0.05;
+const CHAIN_ORDER = ["robinhood", "stable"];
 
 function formatAge(scannedAt) {
   const seconds = Math.floor((Date.now() - scannedAt) / 1000);
@@ -23,9 +23,7 @@ function getSeenAddresses() {
 function saveSeenAddresses(addresses) {
   try {
     localStorage.setItem(SEEN_KEY, JSON.stringify([...addresses]));
-  } catch {
-    // ignore storage errors (e.g. private browsing)
-  }
+  } catch {}
 }
 
 function formatCompactUsd(value) {
@@ -53,6 +51,10 @@ function verifiedBadge(verified) {
     : `<span class="badge badge-red">Unverified</span>`;
 }
 
+function proxyBadge(isProxy) {
+  return isProxy ? `<span class="badge badge-red">Upgradeable</span>` : "";
+}
+
 function riskyBadge(riskyFunctions) {
   if (riskyFunctions && riskyFunctions.length) {
     return `<span class="badge badge-red">${riskyFunctions.join(", ")}</span>`;
@@ -60,7 +62,11 @@ function riskyBadge(riskyFunctions) {
   return `<span class="badge badge-green">No risky fns</span>`;
 }
 
-function holdingBadge(pct) {
+function holdingBadge(t) {
+  if (t.topHolderDataAvailable === false) {
+    return `<span class="badge badge-gray">Top holder: n/a on this chain</span>`;
+  }
+  const pct = t.topHolderPct;
   if (pct === null || pct === undefined) return `<span class="badge badge-gray">Top holder: unknown</span>`;
   let cls = "badge-green";
   if (pct >= 20) cls = "badge-red";
@@ -89,18 +95,19 @@ function renderCard(t, isNew) {
       </div>
       <div class="card-badges">
         ${verifiedBadge(t.verified)}
+        ${proxyBadge(t.isProxy)}
         ${riskyBadge(t.riskyFunctions)}
-        ${holdingBadge(t.topHolderPct)}
+        ${holdingBadge(t)}
         ${lpBadge(t.lpLockStatus)}
       </div>
       ${t.lpOwner ? `
       <div class="lp-owner-row">
-        LP holder: <a href="${EXPLORER_BASE}${t.lpOwner}" target="_blank" rel="noopener">${t.lpOwner.slice(0,6)}…${t.lpOwner.slice(-4)}</a>
+        LP holder: <a href="${t.explorerAddressBase}${t.lpOwner}" target="_blank" rel="noopener">${t.lpOwner.slice(0,6)}…${t.lpOwner.slice(-4)}</a>
         <span class="lp-owner-hint">— check if this is a wallet or a locker contract</span>
       </div>` : ""}
       <div class="card-links">
-        <a href="${EXPLORER_BASE}${t.tokenAddress}" target="_blank" rel="noopener">Explorer</a>
-        <a href="https://app.uniswap.org/explore/pools/robinhoodchain/${t.poolAddress}" target="_blank" rel="noopener">Pool</a>
+        <a href="${t.explorerAddressBase}${t.tokenAddress}" target="_blank" rel="noopener">Explorer</a>
+        <a href="${t.uniswapPoolUrlBase}${t.poolAddress}" target="_blank" rel="noopener">Pool</a>
       </div>
     </div>
   `;
@@ -126,6 +133,38 @@ function attachCopyHandlers(container) {
   });
 }
 
+function renderChainSection(chainKey, chainLabel, allTokens, safuTokens, isNewFn) {
+  return `
+    <section class="chain-section">
+      <h2 class="chain-title">${chainLabel}</h2>
+      <div class="board">
+        <section class="column">
+          <div class="column-head">
+            <h3>All launches</h3>
+            <span class="count-pill">${allTokens.length}</span>
+          </div>
+          <div class="card-list">
+            ${allTokens.length
+              ? allTokens.map((t) => renderCard(t, isNewFn(t))).join("")
+              : `<p class="column-empty">Nothing scanned yet.</p>`}
+          </div>
+        </section>
+        <section class="column">
+          <div class="column-head">
+            <h3>SAFU <span class="column-sub">verified · no risky fns · not upgradeable · &lt;5% top holder · min liquidity</span></h3>
+            <span class="count-pill count-pill-green">${safuTokens.length}</span>
+          </div>
+          <div class="card-list">
+            ${safuTokens.length
+              ? safuTokens.map((t) => renderCard(t, isNewFn(t))).join("")
+              : `<p class="column-empty">None have passed the filter yet.</p>`}
+          </div>
+        </section>
+      </div>
+    </section>
+  `;
+}
+
 async function loadTokens({ scanFirst } = {}) {
   if (scanFirst) {
     const status = document.getElementById("lastUpdated");
@@ -140,46 +179,50 @@ async function loadTokens({ scanFirst } = {}) {
   const res = await fetch("/api/tokens");
   const tokens = await res.json();
 
-  const allList = document.getElementById("allList");
-  const safuList = document.getElementById("safuList");
-  const allEmpty = document.getElementById("allEmpty");
-  const safuEmpty = document.getElementById("safuEmpty");
-
-  const safuTokens = tokens.filter((t) => t.isSafu);
-
-  document.getElementById("allCount").textContent = tokens.length;
-  document.getElementById("safuCount").textContent = safuTokens.length;
-
-  // Apply "hide dust" toggle
   const hideSpam = document.getElementById("hideSpamToggle").checked;
-  let displayedTokens = hideSpam
-    ? tokens.filter((t) => t.baseLiquidity >= DUST_THRESHOLD_ETH)
-    : tokens;
-
-  // Apply sort order
   const sortBy = document.getElementById("sortSelect").value;
-  displayedTokens = [...displayedTokens].sort((a, b) => {
-    if (sortBy === "liquidity") return b.baseLiquidity - a.baseLiquidity;
-    if (sortBy === "mcap") return (b.marketCapUsd || 0) - (a.marketCapUsd || 0);
-    return b.scannedAt - a.scannedAt; // newest first (default)
+  const seen = getSeenAddresses();
+  const isNew = (t) => !seen.has(`${t.chain}:${t.tokenAddress}`);
+
+  const byChain = new Map();
+  for (const t of tokens) {
+    if (!byChain.has(t.chain)) byChain.set(t.chain, { label: t.chainLabel, tokens: [] });
+    byChain.get(t.chain).tokens.push(t);
+  }
+
+  const chainKeys = [...byChain.keys()].sort((a, b) => {
+    const ai = CHAIN_ORDER.indexOf(a);
+    const bi = CHAIN_ORDER.indexOf(b);
+    if (ai !== -1 && bi !== -1) return ai - bi;
+    if (ai !== -1) return -1;
+    if (bi !== -1) return 1;
+    return a.localeCompare(b);
   });
 
-  // Mark tokens not seen in a previous visit as NEW
-  const seen = getSeenAddresses();
-  const isNew = (t) => !seen.has(t.tokenAddress);
+  const sortFn = (a, b) => {
+    if (sortBy === "liquidity") return b.baseLiquidity - a.baseLiquidity;
+    if (sortBy === "mcap") return (b.marketCapUsd || 0) - (a.marketCapUsd || 0);
+    return b.scannedAt - a.scannedAt;
+  };
 
-  allEmpty.style.display = displayedTokens.length ? "none" : "block";
-  safuEmpty.style.display = safuTokens.length ? "none" : "block";
+  let html = "";
+  for (const key of chainKeys) {
+    const { label, tokens: chainTokens } = byChain.get(key);
+    const safuTokens = chainTokens.filter((t) => t.isSafu).sort(sortFn);
+    let allTokens = hideSpam
+      ? chainTokens.filter((t) => t.baseLiquidity >= DUST_THRESHOLD_ETH)
+      : chainTokens;
+    allTokens = [...allTokens].sort(sortFn);
 
-  allList.innerHTML = displayedTokens.map((t) => renderCard(t, isNew(t))).join("");
-  safuList.innerHTML = safuTokens.map((t) => renderCard(t, isNew(t))).join("");
+    html += renderChainSection(key, label, allTokens, safuTokens, isNew);
+  }
 
-  // After rendering, remember every token address we've now shown at least once
-  tokens.forEach((t) => seen.add(t.tokenAddress));
+  const container = document.getElementById("chainSections");
+  container.innerHTML = html || `<p class="column-empty">No chains have data yet.</p>`;
+  attachCopyHandlers(container);
+
+  tokens.forEach((t) => seen.add(`${t.chain}:${t.tokenAddress}`));
   saveSeenAddresses(seen);
-
-  attachCopyHandlers(allList);
-  attachCopyHandlers(safuList);
 
   document.getElementById("lastUpdated").textContent =
     "Updated " + new Date().toLocaleTimeString();
