@@ -1,15 +1,7 @@
 require("dotenv").config();
 
-// Global settings shared across every network we scan.
 const shared = {
   scanIntervalMinutes: Number(process.env.SCAN_INTERVAL_MINUTES || 5),
-
-  // A token counts as "SAFU" only if all of these hold:
-  // - contract source is verified
-  // - no risky functions (mint/blacklist/pause/etc.) found
-  // - not an upgradeable/proxy contract
-  // - top holder (excluding the pool) holds less than this % of supply
-  // - liquidity is at least this much of the network's base asset
   safuMaxDeployerPct: Number(process.env.SAFU_MAX_DEPLOYER_PCT || 5),
   safuMinLiquidityEth: Number(process.env.SAFU_MIN_LIQUIDITY_ETH || 1),
 
@@ -17,7 +9,6 @@ const shared = {
   sessionSecret: process.env.SESSION_SECRET || "insecure-dev-secret",
   port: Number(process.env.PORT || 3000),
 
-  // Addresses that count as "liquidity burned" if the LP position NFT ends up there.
   burnAddresses: new Set([
     "0x000000000000000000000000000000000000dead",
     "0x0000000000000000000000000000000000dead",
@@ -27,9 +18,6 @@ const shared = {
   etherscanApiKey: process.env.ETHERSCAN_API_KEY || "",
 };
 
-// Per-network settings. Each network has its own chain, contracts, and
-// explorer API -- "explorerType" controls which client code (blockscout.js
-// vs etherscan.js) scanner.js uses to talk to it.
 const networks = [
   {
     key: "robinhood",
@@ -43,21 +31,16 @@ const networks = [
     explorerAddressBase: "https://robinhoodchain.blockscout.com/address/",
     uniswapPoolUrlBase: "https://app.uniswap.org/explore/pools/robinhoodchain/",
 
-    // Robinhood Chain produces blocks roughly every 0.1s, so block counts here
-    // go much further than on slower chains. ~90 minutes of history.
-    initialLookbackBlocks: Number(process.env.RH_INITIAL_LOOKBACK_BLOCKS || 54000),
+    initialLookbackBlocks: Number(process.env.RH_INITIAL_LOOKBACK_BLOCKS || 10800),
 
     baseAssetSymbolFallback: "WETH",
-    // Tokens we treat as "the pair", not "the new token", when a pool is created.
     knownBaseTokens: new Set([
-      "0x0bd7d308f8e1639fab988df18a8011f41eacad73", // WETH
-      "0x5fc5360d0400a0fd4f2af552add042d716f1d168", // USDG
+      "0x0bd7d308f8e1639fab988df18a8011f41eacad73",
+      "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
     ]),
-    // Stablecoins we treat as ~$1 directly (skip ETH-price lookup for these).
     usdStableBases: new Set([
-      "0x5fc5360d0400a0fd4f2af552add042d716f1d168", // USDG
+      "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
     ]),
-    // Known third-party liquidity locker contracts. Empty until confirmed.
     knownLockerContracts: new Set([]),
   },
   {
@@ -70,17 +53,16 @@ const networks = [
     explorerType: "etherscan",
     explorerApi: "https://api.etherscan.io/v2/api",
     explorerAddressBase: "https://stablescan.xyz/address/",
-    uniswapPoolUrlBase: "https://stablescan.xyz/address/", // no Uniswap Explore page for this chain yet
+    uniswapPoolUrlBase: "https://stablescan.xyz/address/",
 
-    // Stable chain produces blocks roughly every 0.7s. ~90 minutes of history.
     initialLookbackBlocks: Number(process.env.STABLE_INITIAL_LOOKBACK_BLOCKS || 7700),
 
     baseAssetSymbolFallback: "USDT0",
     knownBaseTokens: new Set([
-      "0x779ded0c9e1022225f8e0630b35a9b54be713736", // USDT0
+      "0x779ded0c9e1022225f8e0630b35a9b54be713736",
     ]),
     usdStableBases: new Set([
-      "0x779ded0c9e1022225f8e0630b35a9b54be713736", // USDT0 is already ~$1
+      "0x779ded0c9e1022225f8e0630b35a9b54be713736",
     ]),
     knownLockerContracts: new Set([]),
   },
