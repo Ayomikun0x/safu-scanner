@@ -23,7 +23,6 @@ body {
   min-height: 100vh;
 }
 
-/* --- Login --- */
 .login-body {
   display: flex;
   align-items: center;
@@ -85,7 +84,6 @@ body {
   margin-top: 12px;
 }
 
-/* --- Dashboard --- */
 .topbar {
   display: flex;
   align-items: center;
@@ -173,7 +171,6 @@ main {
   font-size: 13px;
 }
 
-/* --- Two-column board --- */
 .board {
   display: flex;
   gap: 20px;
@@ -185,6 +182,25 @@ main {
   min-width: 0;
 }
 
+.global-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.chain-section {
+  margin-bottom: 36px;
+}
+
+.chain-title {
+  font-size: 16px;
+  font-weight: 700;
+  margin: 0 0 14px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
 .column-head {
   display: flex;
   align-items: center;
@@ -194,14 +210,6 @@ main {
   padding-bottom: 10px;
   border-bottom: 1px solid var(--border);
   margin-bottom: 12px;
-}
-
-.column-controls {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-left: auto;
-  margin-right: 10px;
 }
 
 .toggle-label {
@@ -245,7 +253,7 @@ main {
   letter-spacing: 0.03em;
 }
 
-.column-head h2 {
+.column-head h3 {
   font-size: 14px;
   margin: 0;
   font-weight: 600;
