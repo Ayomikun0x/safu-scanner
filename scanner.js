@@ -156,6 +156,9 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
   const token = new ethers.Contract(newTokenAddress, ERC20_ABI, provider);
   const baseToken = new ethers.Contract(baseTokenAddress, ERC20_ABI, provider);
 
+  const block = await provider.getBlock(blockNumber).catch(() => null);
+  const launchedAt = block ? block.timestamp * 1000 : Date.now();
+
   const [name, symbol, decimals, totalSupply, baseBalanceInPool, baseSymbol, newTokenBalanceInPool] =
     await Promise.all([
       token.name().catch(() => "Unknown"),
@@ -216,6 +219,7 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
     decimals: Number(decimals),
     totalSupply: totalSupply.toString(),
     poolAddress: poolAddress.toLowerCase(),
+    baseTokenAddress: baseTokenAddress.toLowerCase(),
     baseSymbol,
     baseLiquidity: baseLiquidityFormatted,
     priceUsd,
@@ -230,13 +234,77 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
     lpOwner: lpLock.owner,
     isSafu,
     blockNumber,
+    launchedAt,
     scannedAt: Date.now(),
   };
+}
+
+async function refreshKnownTokenPrices(network) {
+  const { provider } = getContext(network);
+  const known = db.getAll().filter((t) => t.chain === network.key);
+  if (known.length === 0) return;
+
+  const REFRESH_BATCH_SIZE = 10;
+  for (let i = 0; i < known.length; i += REFRESH_BATCH_SIZE) {
+    const batch = known.slice(i, i + REFRESH_BATCH_SIZE);
+    await Promise.allSettled(
+      batch.map(async (record) => {
+        try {
+          if (!record.baseTokenAddress) return;
+
+          const token = new ethers.Contract(record.tokenAddress, ERC20_ABI, provider);
+          const baseToken = new ethers.Contract(record.baseTokenAddress, ERC20_ABI, provider);
+
+          const [newTokenBalanceInPool, baseBalanceInPool] = await Promise.all([
+            token.balanceOf(record.poolAddress).catch(() => null),
+            baseToken.balanceOf(record.poolAddress).catch(() => null),
+          ]);
+
+          if (newTokenBalanceInPool === null || baseBalanceInPool === null) return;
+
+          const newTokenReserveFormatted = Number(
+            ethers.formatUnits(newTokenBalanceInPool, record.decimals)
+          );
+          const baseLiquidityFormatted = Number(ethers.formatUnits(baseBalanceInPool, 18));
+
+          if (newTokenReserveFormatted <= 0) return;
+
+          const priceInBase = baseLiquidityFormatted / newTokenReserveFormatted;
+          const totalSupplyFormatted = Number(
+            ethers.formatUnits(record.totalSupply, record.decimals)
+          );
+
+          let priceUsd = null;
+          if (network.usdStableBases.has(record.baseTokenAddress)) {
+            priceUsd = priceInBase;
+          } else {
+            const ethUsd = await getEthUsdPrice();
+            if (ethUsd) priceUsd = priceInBase * ethUsd;
+          }
+
+          const marketCapUsd = priceUsd !== null ? priceUsd * totalSupplyFormatted : null;
+
+          db.upsertToken({
+            ...record,
+            baseLiquidity: baseLiquidityFormatted,
+            priceUsd,
+            marketCapUsd,
+            isSafu: record.isSafu && baseLiquidityFormatted >= config.safuMinLiquidityEth,
+          });
+        } catch (err) {
+          // Skip this token's refresh silently -- next cycle will retry.
+        }
+      })
+    );
+  }
 }
 
 async function scanNetwork(network) {
   const { provider, factory } = getContext(network);
   const currentBlock = await provider.getBlockNumber();
+
+  console.log(`[${network.label}] Refreshing prices for already-known tokens...`);
+  await refreshKnownTokenPrices(network);
 
   const lastScanned = db.getLastScannedBlock(network.key);
   const fromBlock = lastScanned
