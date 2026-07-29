@@ -2,8 +2,8 @@ const SEEN_KEY = "safu_scanner_seen_tokens";
 const DUST_THRESHOLD_ETH = 0.05;
 const CHAIN_ORDER = ["robinhood", "stable"];
 
-function formatAge(scannedAt) {
-  const seconds = Math.floor((Date.now() - scannedAt) / 1000);
+function formatAge(timestampMs) {
+  const seconds = Math.floor((Date.now() - timestampMs) / 1000);
   if (seconds < 60) return `${seconds}s ago`;
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes}m ago`;
@@ -87,7 +87,7 @@ function renderCard(t, isNew) {
       <div class="card-stats-row">
         <span class="stat-item">MC <strong>${formatCompactUsd(t.marketCapUsd)}</strong></span>
         <span class="stat-item">Price <strong>${formatCompactUsd(t.priceUsd)}</strong></span>
-        <span class="token-age">${formatAge(t.scannedAt)}</span>
+        <span class="token-age">${formatAge(t.launchedAt || t.scannedAt)}</span>
       </div>
       <div class="card-addr-row">
         <span class="token-addr">${t.tokenAddress}</span>
@@ -202,7 +202,7 @@ async function loadTokens({ scanFirst } = {}) {
   const sortFn = (a, b) => {
     if (sortBy === "liquidity") return b.baseLiquidity - a.baseLiquidity;
     if (sortBy === "mcap") return (b.marketCapUsd || 0) - (a.marketCapUsd || 0);
-    return b.scannedAt - a.scannedAt;
+    return (b.launchedAt || b.scannedAt) - (a.launchedAt || a.scannedAt);
   };
 
   let html = "";
