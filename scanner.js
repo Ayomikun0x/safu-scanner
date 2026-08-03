@@ -5,8 +5,9 @@ const db = require("./db");
 const blockscout = require("./explorers/blockscout");
 const etherscan = require("./explorers/etherscan");
 
+// Simple in-memory cache for ETH/USD so we don't hit the price API on every token.
 let ethPriceCache = { value: null, fetchedAt: 0 };
-const ETH_PRICE_TTL_MS = 5 * 60 * 1000;
+const ETH_PRICE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 async function getEthUsdPrice() {
   const now = Date.now();
@@ -37,15 +38,29 @@ function formatCompactUsd(value) {
   return `$${value.toFixed(6)}`;
 }
 
+// Function name fragments that, if present in a verified contract's ABI,
+// mean the owner/deployer can do something that puts your funds at risk.
 const RISKY_FUNCTION_KEYWORDS = [
-  "mint", "blacklist", "blocklist", "pause", "freeze", "setfee",
-  "excludefromfee", "setmaxtx", "setmaxwallet", "rescuetoken",
-  "withdrawtoken", "setrouter",
+  "mint",
+  "blacklist",
+  "blocklist",
+  "pause",
+  "freeze",
+  "setfee",
+  "excludefromfee",
+  "setmaxtx",
+  "setmaxwallet",
+  "rescuetoken",
+  "withdrawtoken",
+  "setrouter",
 ];
 
+// EIP-1967 standard storage slot where upgradeable (proxy) contracts store
+// their real logic address. Works the same way on any EVM chain.
 const EIP1967_IMPLEMENTATION_SLOT =
   "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bb";
 
+// Chunk eth_getLogs calls so we don't blow past provider block-range limits.
 const LOG_CHUNK_SIZE = 2000;
 
 async function getLogsChunked(contract, eventFilter, fromBlock, toBlock) {
@@ -64,6 +79,8 @@ async function getLogsChunked(contract, eventFilter, fromBlock, toBlock) {
   return allLogs;
 }
 
+// Cache one ethers provider + contract set per network so we don't recreate
+// them on every single token check.
 const networkContext = new Map();
 
 function getContext(network) {
@@ -250,7 +267,7 @@ async function refreshKnownTokenPrices(network) {
     await Promise.allSettled(
       batch.map(async (record) => {
         try {
-          if (!record.baseTokenAddress) return;
+          if (!record.baseTokenAddress) return; // older record from before this field existed
 
           const token = new ethers.Contract(record.tokenAddress, ERC20_ABI, provider);
           const baseToken = new ethers.Contract(record.baseTokenAddress, ERC20_ABI, provider);
@@ -347,6 +364,8 @@ async function scanNetwork(network) {
     });
   }
 
+  // Analyze tokens in small parallel batches instead of one at a time --
+  // a single sequential pass over hundreds of pools could take hours.
   const BATCH_SIZE = 8;
   for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
     const batch = candidates.slice(i, i + BATCH_SIZE);
@@ -385,16 +404,17 @@ async function scanOnce() {
 
   scanInProgress = true;
   try {
-    const results = [];
-    for (const network of config.networks) {
-      try {
-        const result = await scanNetwork(network);
-        results.push(result);
-      } catch (err) {
-        console.error(`[${network.label}] Network scan failed:`, err.message);
-        results.push({ network: network.key, scanned: 0, newTokens: 0, error: err.message });
-      }
-    }
+    const settled = await Promise.allSettled(
+      config.networks.map((network) => scanNetwork(network))
+    );
+
+    const results = settled.map((outcome, i) => {
+      const network = config.networks[i];
+      if (outcome.status === "fulfilled") return outcome.value;
+      console.error(`[${network.label}] Network scan failed:`, outcome.reason?.message);
+      return { network: network.key, scanned: 0, newTokens: 0, error: outcome.reason?.message };
+    });
+
     return {
       scanned: results.reduce((sum, r) => sum + r.scanned, 0),
       newTokens: results.reduce((sum, r) => sum + r.newTokens, 0),
