@@ -41,7 +41,10 @@ const networks = [
     usdStableBases: new Set([
       "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
     ]),
-    knownLockerContracts: new Set([]),
+    knownLockerContracts: new Set([
+      "0x736d76699c26d0d966744cae304c000d471f7f35", // Pons active locker
+      "0x31ca5e101941a93a7dd6d0497928700625cf54b5", // Pons legacy locker
+    ]),
   },
   {
     key: "stable",
