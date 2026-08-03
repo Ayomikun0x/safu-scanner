@@ -35,6 +35,7 @@ const networks = [
     uniswapPoolUrlBase: "https://app.uniswap.org/explore/pools/robinhoodchain/",
 
     initialLookbackBlocks: Number(process.env.RH_INITIAL_LOOKBACK_BLOCKS || 10800),
+    logChunkSize: Number(process.env.RH_LOG_CHUNK_SIZE || 2000),
 
     baseAssetSymbolFallback: "WETH",
     knownBaseTokens: new Set([
@@ -62,6 +63,7 @@ const networks = [
     uniswapPoolUrlBase: "https://stablescan.xyz/address/",
 
     initialLookbackBlocks: Number(process.env.STABLE_INITIAL_LOOKBACK_BLOCKS || 7700),
+    logChunkSize: Number(process.env.STABLE_LOG_CHUNK_SIZE || 500),
 
     baseAssetSymbolFallback: "USDT0",
     knownBaseTokens: new Set([
