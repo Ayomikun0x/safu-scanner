@@ -47,13 +47,13 @@ const RISKY_FUNCTION_KEYWORDS = [
 const EIP1967_IMPLEMENTATION_SLOT =
   "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bb";
 
-const LOG_CHUNK_SIZE = 2000;
+const DEFAULT_LOG_CHUNK_SIZE = 2000;
 
-async function getLogsChunked(contract, eventFilter, fromBlock, toBlock) {
+async function getLogsChunked(contract, eventFilter, fromBlock, toBlock, chunkSize = DEFAULT_LOG_CHUNK_SIZE) {
   const allLogs = [];
   let start = fromBlock;
   while (start <= toBlock) {
-    const end = Math.min(start + LOG_CHUNK_SIZE - 1, toBlock);
+    const end = Math.min(start + chunkSize - 1, toBlock);
     try {
       const logs = await contract.queryFilter(eventFilter, start, end);
       allLogs.push(...logs);
@@ -115,7 +115,7 @@ async function findLpLockStatus(network, poolAddress, fromBlock) {
   try {
     const toBlock = fromBlock + 200;
     const mintFilter = positionManager.filters.Transfer(ethers.ZeroAddress, null, null);
-    const mintLogs = await getLogsChunked(positionManager, mintFilter, fromBlock, toBlock);
+    const mintLogs = await getLogsChunked(positionManager, mintFilter, fromBlock, toBlock, network.logChunkSize);
 
     for (const log of mintLogs) {
       const tokenId = log.args.tokenId;
@@ -335,7 +335,7 @@ async function scanNetwork(network) {
     `[${network.label}] Scanning blocks ${fromBlock} -> ${currentBlock} (${currentBlock - fromBlock} blocks)`
   );
   const filter = factory.filters.PoolCreated();
-  const logs = await getLogsChunked(factory, filter, fromBlock, currentBlock);
+  const logs = await getLogsChunked(factory, filter, fromBlock, currentBlock, network.logChunkSize);
   console.log(`[${network.label}] Found ${logs.length} pool(s) created in this window`);
 
   let newTokenCount = 0;
@@ -363,7 +363,32 @@ async function scanNetwork(network) {
     });
   }
 
-  const BATCH_SIZE = 8;
+  // Fast pre-check: grab just the base-token liquidity for every candidate
+  // (one cheap call each, done at high concurrency) so we can process the
+  // most promising -- most likely to already be SAFU -- tokens first. This
+  // gets alerts out sooner instead of them waiting behind a pile of
+  // low-liquidity noise processed in arbitrary blockchain order.
+  const { provider: precheckProvider } = getContext(network);
+  const PRECHECK_CONCURRENCY = 25;
+  for (let i = 0; i < candidates.length; i += PRECHECK_CONCURRENCY) {
+    const slice = candidates.slice(i, i + PRECHECK_CONCURRENCY);
+    await Promise.all(
+      slice.map(async (c) => {
+        try {
+          const baseToken = new ethers.Contract(c.baseToken, ERC20_ABI, precheckProvider);
+          const bal = await baseToken.balanceOf(c.pool);
+          c.quickLiquidity = Number(ethers.formatUnits(bal, 18));
+        } catch {
+          c.quickLiquidity = 0;
+        }
+      })
+    );
+  }
+  candidates.sort((a, b) => b.quickLiquidity - a.quickLiquidity);
+
+  // Analyze tokens in small parallel batches instead of one at a time --
+  // a single sequential pass over hundreds of pools could take hours.
+  const BATCH_SIZE = 12;
   for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
     const batch = candidates.slice(i, i + BATCH_SIZE);
     const results = await Promise.allSettled(
