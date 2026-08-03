@@ -4,10 +4,10 @@ const { FACTORY_ABI, ERC20_ABI, POOL_ABI, POSITION_MANAGER_ABI } = require("./ab
 const db = require("./db");
 const blockscout = require("./explorers/blockscout");
 const etherscan = require("./explorers/etherscan");
+const telegram = require("./telegram");
 
-// Simple in-memory cache for ETH/USD so we don't hit the price API on every token.
 let ethPriceCache = { value: null, fetchedAt: 0 };
-const ETH_PRICE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const ETH_PRICE_TTL_MS = 5 * 60 * 1000;
 
 async function getEthUsdPrice() {
   const now = Date.now();
@@ -38,29 +38,15 @@ function formatCompactUsd(value) {
   return `$${value.toFixed(6)}`;
 }
 
-// Function name fragments that, if present in a verified contract's ABI,
-// mean the owner/deployer can do something that puts your funds at risk.
 const RISKY_FUNCTION_KEYWORDS = [
-  "mint",
-  "blacklist",
-  "blocklist",
-  "pause",
-  "freeze",
-  "setfee",
-  "excludefromfee",
-  "setmaxtx",
-  "setmaxwallet",
-  "rescuetoken",
-  "withdrawtoken",
-  "setrouter",
+  "mint", "blacklist", "blocklist", "pause", "freeze", "setfee",
+  "excludefromfee", "setmaxtx", "setmaxwallet", "rescuetoken",
+  "withdrawtoken", "setrouter",
 ];
 
-// EIP-1967 standard storage slot where upgradeable (proxy) contracts store
-// their real logic address. Works the same way on any EVM chain.
 const EIP1967_IMPLEMENTATION_SLOT =
   "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bb";
 
-// Chunk eth_getLogs calls so we don't blow past provider block-range limits.
 const LOG_CHUNK_SIZE = 2000;
 
 async function getLogsChunked(contract, eventFilter, fromBlock, toBlock) {
@@ -79,8 +65,6 @@ async function getLogsChunked(contract, eventFilter, fromBlock, toBlock) {
   return allLogs;
 }
 
-// Cache one ethers provider + contract set per network so we don't recreate
-// them on every single token check.
 const networkContext = new Map();
 
 function getContext(network) {
@@ -267,7 +251,7 @@ async function refreshKnownTokenPrices(network) {
     await Promise.allSettled(
       batch.map(async (record) => {
         try {
-          if (!record.baseTokenAddress) return; // older record from before this field existed
+          if (!record.baseTokenAddress) return;
 
           const token = new ethers.Contract(record.tokenAddress, ERC20_ABI, provider);
           const baseToken = new ethers.Contract(record.baseTokenAddress, ERC20_ABI, provider);
@@ -301,13 +285,28 @@ async function refreshKnownTokenPrices(network) {
 
           const marketCapUsd = priceUsd !== null ? priceUsd * totalSupplyFormatted : null;
 
-          db.upsertToken({
+          const newIsSafu =
+            record.verified &&
+            record.riskyFunctions.length === 0 &&
+            !record.isProxy &&
+            record.topHolderPct !== null &&
+            record.topHolderPct < config.safuMaxDeployerPct &&
+            baseLiquidityFormatted >= config.safuMinLiquidityEth;
+
+          const updatedRecord = {
             ...record,
             baseLiquidity: baseLiquidityFormatted,
             priceUsd,
             marketCapUsd,
-            isSafu: record.isSafu && baseLiquidityFormatted >= config.safuMinLiquidityEth,
-          });
+            isSafu: newIsSafu,
+          };
+
+          if (newIsSafu && !record.isSafu && !record.alertedAt) {
+            updatedRecord.alertedAt = Date.now();
+            telegram.sendSafuAlert(updatedRecord);
+          }
+
+          db.upsertToken(updatedRecord);
         } catch (err) {
           // Skip this token's refresh silently -- next cycle will retry.
         }
@@ -364,8 +363,6 @@ async function scanNetwork(network) {
     });
   }
 
-  // Analyze tokens in small parallel batches instead of one at a time --
-  // a single sequential pass over hundreds of pools could take hours.
   const BATCH_SIZE = 8;
   for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
     const batch = candidates.slice(i, i + BATCH_SIZE);
@@ -375,9 +372,14 @@ async function scanNetwork(network) {
 
     results.forEach((result, idx) => {
       if (result.status === "fulfilled") {
-        db.upsertToken(result.value);
+        const record = result.value;
+        if (record.isSafu) {
+          record.alertedAt = Date.now();
+          telegram.sendSafuAlert(record);
+        }
+        db.upsertToken(record);
         newTokenCount += 1;
-        console.log(`[${network.label}] Recorded: ${result.value.symbol} (${result.value.tokenAddress})`);
+        console.log(`[${network.label}] Recorded: ${record.symbol} (${record.tokenAddress})`);
       } else {
         console.error(`[${network.label}] Failed to analyze token ${batch[idx].newToken}:`, result.reason?.message);
       }
