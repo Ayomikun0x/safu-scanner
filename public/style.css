@@ -409,7 +409,11 @@ main {
   color: var(--gray);
   font-style: italic;
 }
-
+.lp-owner-hint-risk {
+  color: var(--red);
+  font-style: normal;
+  font-weight: 600;
+}
 .card-links a {
   color: var(--accent);
   text-decoration: none;
