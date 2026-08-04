@@ -54,7 +54,7 @@ const SPOOF_KEYWORDS = [
 const MAX_NAME_LENGTH = 40;
 const MAX_SYMBOL_LENGTH = 15;
 const MAX_RECHECK_ATTEMPTS = 5;
-const LIQUIDITY_COLLAPSE_RATIO = 0.2; // liquidity dropping below 20% of its peak
+const LIQUIDITY_COLLAPSE_RATIO = 0.2;
 
 function sanitizeIdentity(raw, maxLength) {
   const str = String(raw || "").trim();
@@ -70,8 +70,6 @@ function looksSpoofed(name, symbol) {
 const EIP1967_IMPLEMENTATION_SLOT =
   "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bb";
 
-// Minimal extra ABI fragments -- these don't need to touch abis.js since
-// they're only used here for a couple of narrow, standard-pattern reads.
 const OWNERSHIP_ABI = ["function owner() view returns (address)"];
 const TRANSFER_EVENT_ABI = ["event Transfer(address indexed from, address indexed to, uint256 value)"];
 
@@ -147,9 +145,6 @@ async function checkIsProxy(network, address) {
   }
 }
 
-// Returns true (renounced), false (still owned), or null (contract doesn't
-// use this pattern / call failed -- genuinely unknown, doesn't count against
-// the token since plenty of legitimate contracts don't implement owner()).
 async function checkOwnershipRenounced(network, address) {
   try {
     const { provider } = getContext(network);
@@ -161,13 +156,13 @@ async function checkOwnershipRenounced(network, address) {
   }
 }
 
-// Looks at the token's own Transfer events in the first few blocks after
-// launch to see whether a small cluster of wallets scooped up an outsized
-// share of supply almost instantly -- a common way to work around a
-// single-address top-holder check by splitting control across several
-// wallets. Returns pct=null when the check itself couldn't run (doesn't
-// block SAFU); pct=0 when it ran cleanly and found no meaningful early
-// concentration.
+// FIXED: track NET tokens held (received minus sent) within the window,
+// not gross received. A swap often routes pool -> router -> buyer, firing
+// two Transfer events for the same underlying tokens -- counting gross
+// "received" double-counts the router as if it were a real holder, which
+// was pushing totals past 100% of supply and wrongly blocking every token.
+// Netting it out makes any pass-through address (received then immediately
+// forwarded) cancel itself out to ~0, leaving only genuine end-holders.
 async function findEarlySnipers(network, tokenAddress, poolAddress, launchBlock, totalSupplyFormatted, decimals) {
   try {
     const { provider } = getContext(network);
@@ -182,23 +177,31 @@ async function findEarlySnipers(network, tokenAddress, poolAddress, launchBlock,
       "0x000000000000000000000000000000000000dead",
     ]);
 
-    const received = new Map();
+    const net = new Map();
     for (const log of logs) {
       const to = log.args.to.toLowerCase();
-      if (excluded.has(to)) continue;
+      const from = log.args.from.toLowerCase();
       const amount = Number(ethers.formatUnits(log.args.value, decimals));
-      received.set(to, (received.get(to) || 0) + amount);
+
+      if (!excluded.has(to)) {
+        net.set(to, (net.get(to) || 0) + amount);
+      }
+      if (!excluded.has(from)) {
+        net.set(from, (net.get(from) || 0) - amount);
+      }
     }
 
-    if (totalSupplyFormatted <= 0 || received.size === 0) {
+    const positiveHolders = [...net.entries()].filter(([, amount]) => amount > 0);
+
+    if (totalSupplyFormatted <= 0 || positiveHolders.length === 0) {
       return { pct: 0, wallets: 0, windowBlocks: config.earlySniperWindowBlocks };
     }
 
-    const sorted = [...received.values()].sort((a, b) => b - a);
+    const sorted = positiveHolders.map(([, amount]) => amount).sort((a, b) => b - a);
     const topFew = sorted.slice(0, 3).reduce((sum, v) => sum + v, 0);
-    const pct = (topFew / totalSupplyFormatted) * 100;
+    const pct = Math.min((topFew / totalSupplyFormatted) * 100, 100);
 
-    return { pct, wallets: received.size, windowBlocks: config.earlySniperWindowBlocks };
+    return { pct, wallets: positiveHolders.length, windowBlocks: config.earlySniperWindowBlocks };
   } catch (err) {
     return { pct: null, wallets: null, windowBlocks: config.earlySniperWindowBlocks };
   }
@@ -493,9 +496,6 @@ async function refreshKnownTokenPrices(network) {
             };
           }
 
-          // Peak liquidity + lock history, used to detect a later rug: a
-          // sudden liquidity collapse, or a previously-locked/burned LP
-          // getting pulled.
           const peakLiquidity = Math.max(record.peakLiquidity || 0, baseLiquidityFormatted);
           const wasEverLocked = record.wasEverLocked || isLpTrulyLocked(record.lpLockStatus);
           updatedRecord.peakLiquidity = peakLiquidity;
