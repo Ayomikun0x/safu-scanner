@@ -72,6 +72,39 @@ const LOCKER_RISK_KEYWORDS = [
   "bypasslock",
 ];
 
+// Words/patterns malicious deployers put in a token's own name/symbol to
+// make it *look like* a scanner verdict, an audit claim, or a fake stat --
+// e.g. "DEX PAID KIMCHI OWNS 5% (CHROME)" is written specifically to read
+// like a legitimacy claim or warning once it shows up inside an alert. A
+// token doesn't get to write its own SAFU-sounding claims into our output.
+const SPOOF_KEYWORDS = [
+  "safu",
+  "verified",
+  "audited",
+  "audit",
+  "locked",
+  "renounced",
+  "official",
+  "dyor",
+  "rug",
+  "scam",
+  "legit",
+];
+
+const MAX_NAME_LENGTH = 40;
+const MAX_SYMBOL_LENGTH = 15;
+
+function sanitizeIdentity(raw, maxLength) {
+  const str = String(raw || "").trim();
+  return str.length > maxLength ? str.slice(0, maxLength) + "…" : str;
+}
+
+function looksSpoofed(name, symbol) {
+  const combined = `${name} ${symbol}`.toLowerCase();
+  if (/\d+\s*%/.test(combined)) return true; // fake percentage claims, e.g. "OWNS 5%"
+  return SPOOF_KEYWORDS.some((kw) => combined.includes(kw));
+}
+
 // EIP-1967 standard storage slot where upgradeable (proxy) contracts store
 // their real logic address. Works the same way on any EVM chain.
 const EIP1967_IMPLEMENTATION_SLOT =
@@ -222,8 +255,6 @@ async function findLpLockStatus(network, poolAddress, fromBlock) {
         const safety = await checkLockerContractSafety(network, currentOwner);
         let status;
         if (!safety.verified) {
-          // Known locker address, but we can't read its source to confirm
-          // the lock actually holds -- don't blindly call this "locked".
           status = "locked-unverified";
         } else if (safety.hasEarlyExitRisk) {
           status = "locked-risky";
@@ -245,6 +276,10 @@ async function findLpLockStatus(network, poolAddress, fromBlock) {
   return { status: "unknown", owner: null, lockerVerified: null, lockerRiskyFunctions: [] };
 }
 
+function isLpTrulyLocked(lpLockStatus) {
+  return lpLockStatus === "locked" || lpLockStatus === "burned";
+}
+
 async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolAddress, blockNumber) {
   const { provider } = getContext(network);
   const token = new ethers.Contract(newTokenAddress, ERC20_ABI, provider);
@@ -253,16 +288,29 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
   const block = await withTimeout(provider.getBlock(blockNumber), 15000, "getBlock").catch(() => null);
   const launchedAt = block ? block.timestamp * 1000 : Date.now();
 
-  const [name, symbol, decimals, totalSupply, baseBalanceInPool, baseSymbol, newTokenBalanceInPool] =
+  let nameOk = true;
+  let symbolOk = true;
+
+  const [rawName, rawSymbol, decimals, totalSupply, baseBalanceInPool, baseSymbol, newTokenBalanceInPool] =
     await Promise.all([
-      withTimeout(token.name(), 15000, "token.name").catch(() => "Unknown"),
-      withTimeout(token.symbol(), 15000, "token.symbol").catch(() => "???"),
+      withTimeout(token.name(), 15000, "token.name").catch(() => {
+        nameOk = false;
+        return "Unknown";
+      }),
+      withTimeout(token.symbol(), 15000, "token.symbol").catch(() => {
+        symbolOk = false;
+        return "???";
+      }),
       withTimeout(token.decimals(), 15000, "token.decimals").catch(() => 18),
       withTimeout(token.totalSupply(), 15000, "token.totalSupply").catch(() => 0n),
       withTimeout(baseToken.balanceOf(poolAddress), 15000, "baseToken.balanceOf").catch(() => 0n),
       withTimeout(baseToken.symbol(), 15000, "baseToken.symbol").catch(() => network.baseAssetSymbolFallback),
       withTimeout(token.balanceOf(poolAddress), 15000, "token.balanceOf").catch(() => 0n),
     ]);
+
+  const name = sanitizeIdentity(rawName, MAX_NAME_LENGTH);
+  const symbol = sanitizeIdentity(rawSymbol, MAX_SYMBOL_LENGTH);
+  const spoofedIdentity = looksSpoofed(name, symbol);
 
   // These four checks are all independent of each other (and of the block
   // data above), so run them concurrently instead of one after another --
@@ -307,7 +355,11 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
     !isProxy &&
     topHolderRaw.pct !== null &&
     topHolderRaw.pct < config.safuMaxDeployerPct &&
-    baseLiquidityFormatted >= config.safuMinLiquidityEth;
+    baseLiquidityFormatted >= config.safuMinLiquidityEth &&
+    nameOk &&
+    symbolOk &&
+    !spoofedIdentity &&
+    isLpTrulyLocked(lpLock.status);
 
   return {
     chain: network.key,
@@ -317,6 +369,9 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
     tokenAddress: newTokenAddress.toLowerCase(),
     name,
     symbol,
+    nameOk,
+    symbolOk,
+    spoofedIdentity,
     decimals: Number(decimals),
     totalSupply: totalSupply.toString(),
     poolAddress: poolAddress.toLowerCase(),
@@ -387,13 +442,25 @@ async function refreshKnownTokenPrices(network) {
 
           const marketCapUsd = priceUsd !== null ? priceUsd * totalSupplyFormatted : null;
 
+          // Same gating as analyzeNewToken: verified, clean, non-proxy,
+          // acceptable top-holder concentration and liquidity, a name/symbol
+          // that actually resolved and isn't spoofing a legitimacy claim,
+          // and an LP that's genuinely locked or burned -- not just "known
+          // address" or "unlocked"/"unknown". Older records saved before
+          // these fields existed are treated as passing (undefined !== false)
+          // so this doesn't retroactively break existing SAFU entries whose
+          // underlying data we haven't re-checked.
           const newIsSafu =
             record.verified &&
             record.riskyFunctions.length === 0 &&
             !record.isProxy &&
             record.topHolderPct !== null &&
             record.topHolderPct < config.safuMaxDeployerPct &&
-            baseLiquidityFormatted >= config.safuMinLiquidityEth;
+            baseLiquidityFormatted >= config.safuMinLiquidityEth &&
+            record.nameOk !== false &&
+            record.symbolOk !== false &&
+            !record.spoofedIdentity &&
+            isLpTrulyLocked(record.lpLockStatus);
 
           const updatedRecord = {
             ...record,
@@ -467,9 +534,7 @@ async function scanNetwork(network) {
 
   // Fast pre-check: grab just the base-token liquidity for every candidate
   // (one cheap call each, done at high concurrency) so we can process the
-  // most promising -- most likely to already be SAFU -- tokens first. This
-  // gets alerts out sooner instead of them waiting behind a pile of
-  // low-liquidity noise processed in arbitrary blockchain order.
+  // most promising -- most likely to already be SAFU -- tokens first.
   const { provider: precheckProvider } = getContext(network);
   const PRECHECK_CONCURRENCY = 25;
   for (let i = 0; i < candidates.length; i += PRECHECK_CONCURRENCY) {
@@ -533,10 +598,6 @@ async function scanNetwork(network) {
 
 let scanInProgress = false;
 
-// Exposed so server.js's outer watchdog can force this back to false if a
-// scan ever gets abandoned by the outer timeout ceiling (the promise itself
-// keeps running in the background, but we stop waiting on it and treat the
-// lock as free again for the next scheduled cycle).
 function forceResetScanLock() {
   if (scanInProgress) {
     console.warn("Forcing scan lock reset -- previous scan was abandoned by the outer watchdog.");
