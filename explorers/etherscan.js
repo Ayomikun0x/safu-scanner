@@ -41,15 +41,22 @@ async function fetchTopHolderPct(network, tokenAddress, poolAddress) {
   ]);
 
   let top = { pct: null, holder: null };
+  let sawAnyHolder = false;
   for (const item of data.result) {
     const holderAddress = (item.TokenHolderAddress || "").toLowerCase();
     if (!holderAddress || excluded.has(holderAddress)) continue;
+    sawAnyHolder = true;
     const pct = Number(item.TokenHolderPercentage ?? NaN);
     if (Number.isNaN(pct)) continue;
     if (top.pct === null || pct > top.pct) {
       top = { pct, holder: holderAddress };
     }
   }
+
+  if (!sawAnyHolder) {
+    return { pct: 0, holder: null, available: true, rateLimited: false };
+  }
+
   return { pct: top.pct, holder: top.holder, available: true, rateLimited: false };
 }
 
