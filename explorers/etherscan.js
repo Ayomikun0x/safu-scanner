@@ -6,12 +6,16 @@ async function checkContractVerification(network, address) {
     `${network.explorerApi}?chainid=${network.chainId}&module=contract&action=getsourcecode` +
     `&address=${address}&apikey=${config.etherscanApiKey}`;
   const data = await fetchJsonWithTimeout(url);
+
+  if (data && data.__rateLimited) {
+    return { verified: null, rateLimited: true, riskyFunctions: [], abiText: "" };
+  }
   const entry = data?.result?.[0];
   if (!entry || !entry.SourceCode) {
-    return { verified: false, riskyFunctions: [], abiText: "" };
+    return { verified: false, rateLimited: false, riskyFunctions: [], abiText: "" };
   }
   const abiText = (entry.ABI || "").toLowerCase();
-  return { verified: true, riskyFunctions: null, abiText };
+  return { verified: true, rateLimited: false, riskyFunctions: null, abiText };
 }
 
 async function fetchTopHolderPct(network, tokenAddress, poolAddress) {
@@ -22,8 +26,12 @@ async function fetchTopHolderPct(network, tokenAddress, poolAddress) {
     `${network.explorerApi}?chainid=${network.chainId}&module=token&action=tokenholderlist` +
     `&contractaddress=${tokenAddress}&page=1&offset=10&apikey=${config.etherscanApiKey}`;
   const data = await fetchJsonWithTimeout(url);
+
+  if (data && data.__rateLimited) {
+    return { pct: null, holder: null, available: null, rateLimited: true };
+  }
   if (!data || data.status !== "1" || !Array.isArray(data.result)) {
-    return { pct: null, holder: null, available: false };
+    return { pct: null, holder: null, available: false, rateLimited: false };
   }
 
   const excluded = new Set([
@@ -32,7 +40,6 @@ async function fetchTopHolderPct(network, tokenAddress, poolAddress) {
     "0x0000000000000000000000000000000000000000",
   ]);
 
-  // Same fix as blockscout.js -- take the true max, don't trust ordering.
   let top = { pct: null, holder: null };
   for (const item of data.result) {
     const holderAddress = (item.TokenHolderAddress || "").toLowerCase();
@@ -43,7 +50,7 @@ async function fetchTopHolderPct(network, tokenAddress, poolAddress) {
       top = { pct, holder: holderAddress };
     }
   }
-  return { pct: top.pct, holder: top.holder, available: true };
+  return { pct: top.pct, holder: top.holder, available: true, rateLimited: false };
 }
 
 module.exports = { checkContractVerification, fetchTopHolderPct };
