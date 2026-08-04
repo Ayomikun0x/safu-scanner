@@ -25,22 +25,25 @@ async function fetchTopHolderPct(network, tokenAddress, poolAddress) {
   if (!data || data.status !== "1" || !Array.isArray(data.result)) {
     return { pct: null, holder: null, available: false };
   }
+
   const excluded = new Set([
     poolAddress.toLowerCase(),
     "0x0000000000000000000000000000000000dead",
     "0x0000000000000000000000000000000000000000",
   ]);
+
+  // Same fix as blockscout.js -- take the true max, don't trust ordering.
+  let top = { pct: null, holder: null };
   for (const item of data.result) {
     const holderAddress = (item.TokenHolderAddress || "").toLowerCase();
     if (!holderAddress || excluded.has(holderAddress)) continue;
-    const pct = Number(item.TokenHolderPercentage ?? null);
-    return {
-      pct: Number.isNaN(pct) ? null : pct,
-      holder: holderAddress,
-      available: true,
-    };
+    const pct = Number(item.TokenHolderPercentage ?? NaN);
+    if (Number.isNaN(pct)) continue;
+    if (top.pct === null || pct > top.pct) {
+      top = { pct, holder: holderAddress };
+    }
   }
-  return { pct: null, holder: null, available: true };
+  return { pct: top.pct, holder: top.holder, available: true };
 }
 
 module.exports = { checkContractVerification, fetchTopHolderPct };
