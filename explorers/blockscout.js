@@ -49,14 +49,14 @@ async function fetchTopHolderPct(network, tokenAddress, poolAddress) {
   return { pct: top.pct, holder: top.holder, available: true, rateLimited: false };
 }
 
-// NOTE: field name assumed as `creator_address_hash` based on Blockscout's
-// typical API v2 smart-contract response shape -- I haven't been able to
-// verify this against a live response for Robinhood Chain specifically.
-// If deployer tracking silently shows "first launch seen" for every token
-// (i.e. creator never resolves), this field name is the first thing to
-// check against an actual API response.
+// FIXED: creator info doesn't live on the smart-contracts endpoint at all
+// (confirmed by inspecting a real response) -- it's on Blockscout's address
+// endpoint instead, under `creator_address_hash`. This is now only a
+// fallback path -- scanner.js tries the token's own on-chain deployer()
+// getter first, which covers Pons-launched tokens directly without needing
+// this endpoint at all.
 async function getContractCreator(network, address) {
-  const data = await fetchJsonWithTimeout(`${network.explorerApi}/smart-contracts/${address}`);
+  const data = await fetchJsonWithTimeout(`${network.explorerApi}/addresses/${address}`);
   if (data && data.__rateLimited) return { creator: null, rateLimited: true };
   const creator = data?.creator_address_hash || null;
   return { creator: creator ? creator.toLowerCase() : null, rateLimited: false };
