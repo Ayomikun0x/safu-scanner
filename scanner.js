@@ -73,6 +73,25 @@ const EIP1967_IMPLEMENTATION_SLOT =
 const OWNERSHIP_ABI = ["function owner() view returns (address)"];
 const TRANSFER_EVENT_ABI = ["event Transfer(address indexed from, address indexed to, uint256 value)"];
 
+// Some tokens (notably Pons launchpad tokens on Robinhood Chain) expose their
+// own deployer directly on-chain via an immutable `deployer()` getter -- this
+// is more reliable than asking the explorer who created the contract, since
+// it's set once at construction and doesn't depend on the explorer's API
+// shape or a factory-vs-direct-deploy distinction. Not every token implements
+// this, so it's tried first and falls back to the explorer's creator lookup.
+const DEPLOYER_GETTER_ABI = ["function deployer() view returns (address)"];
+
+async function getOnChainDeployer(network, tokenAddress) {
+  try {
+    const { provider } = getContext(network);
+    const contract = new ethers.Contract(tokenAddress, DEPLOYER_GETTER_ABI, provider);
+    const deployer = await withTimeout(contract.deployer(), 10000, "token.deployer()");
+    return deployer.toLowerCase();
+  } catch (err) {
+    return null; // token doesn't implement this pattern -- not an error, just not Pons-style
+  }
+}
+
 const DEFAULT_LOG_CHUNK_SIZE = 2000;
 
 async function getLogsChunked(contract, eventFilter, fromBlock, toBlock, chunkSize = DEFAULT_LOG_CHUNK_SIZE) {
@@ -156,13 +175,6 @@ async function checkOwnershipRenounced(network, address) {
   }
 }
 
-// FIXED: track NET tokens held (received minus sent) within the window,
-// not gross received. A swap often routes pool -> router -> buyer, firing
-// two Transfer events for the same underlying tokens -- counting gross
-// "received" double-counts the router as if it were a real holder, which
-// was pushing totals past 100% of supply and wrongly blocking every token.
-// Netting it out makes any pass-through address (received then immediately
-// forwarded) cancel itself out to ~0, leaving only genuine end-holders.
 async function findEarlySnipers(network, tokenAddress, poolAddress, launchBlock, totalSupplyFormatted, decimals) {
   try {
     const { provider } = getContext(network);
@@ -296,7 +308,7 @@ function isLpTrulyLocked(lpLockStatus) {
 
 async function runSafetyChecks(network, tokenAddress, poolAddress, blockNumber, totalSupplyFormatted, decimals) {
   const client = getExplorerClient(network);
-  const [verification, isProxy, topHolderRaw, lpLock, ownershipRenounced, creatorResult, earlySnipers] = await Promise.all([
+  const [verification, isProxy, topHolderRaw, lpLock, ownershipRenounced, creatorResult, earlySnipers, onChainDeployer] = await Promise.all([
     withTimeout(checkContractVerification(network, tokenAddress), 20000, "checkContractVerification")
       .catch(() => ({ verified: false, riskyFunctions: [], rateLimited: false })),
     withTimeout(checkIsProxy(network, tokenAddress), 15000, "checkIsProxy").catch(() => false),
@@ -311,6 +323,7 @@ async function runSafetyChecks(network, tokenAddress, poolAddress, blockNumber, 
       findEarlySnipers(network, tokenAddress, poolAddress, blockNumber, totalSupplyFormatted, decimals),
       20000, "findEarlySnipers"
     ).catch(() => ({ pct: null, wallets: null, windowBlocks: config.earlySniperWindowBlocks })),
+    withTimeout(getOnChainDeployer(network, tokenAddress), 10000, "getOnChainDeployer").catch(() => null),
   ]);
 
   const rateLimitedAny =
@@ -319,7 +332,9 @@ async function runSafetyChecks(network, tokenAddress, poolAddress, blockNumber, 
     lpLock.rateLimitedLocker === true ||
     creatorResult.rateLimited === true;
 
-  return { verification, isProxy, topHolderRaw, lpLock, ownershipRenounced, creatorResult, earlySnipers, rateLimitedAny };
+  const resolvedDeployer = onChainDeployer || creatorResult.creator;
+
+  return { verification, isProxy, topHolderRaw, lpLock, ownershipRenounced, creatorResult, earlySnipers, rateLimitedAny, resolvedDeployer };
 }
 
 async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolAddress, blockNumber) {
@@ -349,10 +364,10 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
   const spoofedIdentity = looksSpoofed(name, symbol);
   const totalSupplyFormatted = Number(ethers.formatUnits(totalSupply, decimals));
 
-  const { verification, isProxy, topHolderRaw, lpLock, ownershipRenounced, creatorResult, earlySnipers, rateLimitedAny } =
+  const { verification, isProxy, topHolderRaw, lpLock, ownershipRenounced, earlySnipers, rateLimitedAny, resolvedDeployer } =
     await runSafetyChecks(network, newTokenAddress, poolAddress, blockNumber, totalSupplyFormatted, decimals);
 
-  const deployerAddress = creatorResult.creator;
+  const deployerAddress = resolvedDeployer;
   const deployerRecord = deployerAddress ? db.getDeployerRecord(deployerAddress) : { totalLaunches: 0, ruggedCount: 0 };
 
   const baseLiquidityFormatted = Number(ethers.formatUnits(baseBalanceInPool, 18));
@@ -472,7 +487,7 @@ async function refreshKnownTokenPrices(network) {
           let updatedRecord = { ...record, baseLiquidity: baseLiquidityFormatted, priceUsd, marketCapUsd };
 
           if (record.needsRecheck && (record.recheckAttempts || 0) < MAX_RECHECK_ATTEMPTS) {
-            const { verification, isProxy, topHolderRaw, lpLock, ownershipRenounced, creatorResult, earlySnipers, rateLimitedAny } =
+            const { verification, isProxy, topHolderRaw, lpLock, ownershipRenounced, earlySnipers, rateLimitedAny, resolvedDeployer } =
               await runSafetyChecks(network, record.tokenAddress, record.poolAddress, record.blockNumber, totalSupplyFormatted, record.decimals);
 
             updatedRecord = {
@@ -488,7 +503,7 @@ async function refreshKnownTokenPrices(network) {
               lpLockerVerified: lpLock.lockerVerified,
               lpLockerRiskyFunctions: lpLock.lockerRiskyFunctions,
               ownershipRenounced,
-              deployerAddress: creatorResult.creator || record.deployerAddress,
+              deployerAddress: resolvedDeployer || record.deployerAddress,
               earlySniperPct: earlySnipers.pct,
               earlySniperWallets: earlySnipers.wallets,
               needsRecheck: rateLimitedAny,
