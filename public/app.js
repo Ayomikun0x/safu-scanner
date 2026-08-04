@@ -40,18 +40,23 @@ function lpBadge(status) {
     locked: ["badge-green", "Locked"],
     "locked-risky": ["badge-red", "Locked (risky)"],
     "locked-unverified": ["badge-amber", "Locked (unverified)"],
+    "locked-recheck-needed": ["badge-amber", "Locked (rechecking)"],
     unlocked: ["badge-red", "Unlocked"],
     unknown: ["badge-gray", "Unknown"],
   };
   const [cls, label] = map[status] || map.unknown;
   return `<span class="badge ${cls}">LP: ${label}</span>`;
 }
+
 function lpOwnerHint(t) {
   if (t.lpLockStatus === "locked-risky" && t.lpLockerRiskyFunctions?.length) {
     return `<span class="lp-owner-hint lp-owner-hint-risk">— locker contract exposes: ${t.lpLockerRiskyFunctions.join(", ")}</span>`;
   }
   if (t.lpLockStatus === "locked-unverified") {
     return `<span class="lp-owner-hint">— locker contract source isn't verified, can't confirm the lock holds</span>`;
+  }
+  if (t.lpLockStatus === "locked-recheck-needed") {
+    return `<span class="lp-owner-hint">— explorer was rate-limited, rechecking on a later scan</span>`;
   }
   if (t.lpLockStatus === "locked") {
     return `<span class="lp-owner-hint">— known locker, source checked, no early-exit functions found</span>`;
@@ -88,6 +93,49 @@ function holdingBadge(t) {
   return `<span class="badge ${cls}">Top holder: ${pct.toFixed(1)}%</span>`;
 }
 
+function spoofBadge(t) {
+  if (t.spoofedIdentity) {
+    return `<span class="badge badge-red">⚠ Name/symbol looks spoofed</span>`;
+  }
+  return "";
+}
+
+function ownershipBadge(t) {
+  if (t.ownershipRenounced === true) {
+    return `<span class="badge badge-green">Ownership: renounced</span>`;
+  }
+  if (t.ownershipRenounced === false) {
+    return `<span class="badge badge-red">Ownership: active</span>`;
+  }
+  return `<span class="badge badge-gray">Ownership: n/a</span>`;
+}
+
+function deployerBadge(t) {
+  const launches = t.deployerLaunches || 0;
+  const rugged = t.deployerRuggedCount || 0;
+  if (!t.deployerAddress) {
+    return `<span class="badge badge-gray">Deployer: unknown</span>`;
+  }
+  if (rugged > 0) {
+    return `<span class="badge badge-red">Deployer: ${rugged} rugged of ${launches}</span>`;
+  }
+  if (launches > 1) {
+    return `<span class="badge badge-green">Deployer: ${launches} launches, clean</span>`;
+  }
+  return `<span class="badge badge-gray">Deployer: first launch seen</span>`;
+}
+
+function sniperBadge(t) {
+  const pct = t.earlySniperPct;
+  if (pct === null || pct === undefined) {
+    return `<span class="badge badge-gray">Sniping: n/a</span>`;
+  }
+  let cls = "badge-green";
+  if (pct >= 30) cls = "badge-red";
+  else if (pct >= 15) cls = "badge-amber";
+  return `<span class="badge ${cls}">Early buyers: ${pct.toFixed(0)}%</span>`;
+}
+
 function renderCard(t, isNew) {
   return `
     <div class="token-card ${t.isSafu ? "is-safu" : ""}">
@@ -113,8 +161,12 @@ function renderCard(t, isNew) {
         ${riskyBadge(t.riskyFunctions)}
         ${holdingBadge(t)}
         ${lpBadge(t.lpLockStatus)}
+        ${ownershipBadge(t)}
+        ${deployerBadge(t)}
+        ${sniperBadge(t)}
+        ${spoofBadge(t)}
       </div>
-     ${t.lpOwner ? `
+      ${t.lpOwner ? `
       <div class="lp-owner-row">
         LP holder: <a href="${t.explorerAddressBase}${t.lpOwner}" target="_blank" rel="noopener">${t.lpOwner.slice(0,6)}…${t.lpOwner.slice(-4)}</a>
         ${lpOwnerHint(t)}
@@ -165,7 +217,7 @@ function renderChainSection(chainKey, chainLabel, allTokens, safuTokens, isNewFn
         </section>
         <section class="column">
           <div class="column-head">
-            <h3>SAFU <span class="column-sub">verified · no risky fns · not upgradeable · &lt;5% top holder · min liquidity</span></h3>
+            <h3>SAFU <span class="column-sub">verified · no risky fns · not upgradeable · &lt;5% top holder · min liquidity · LP locked · ownership renounced · clean deployer · no sniping</span></h3>
             <span class="count-pill count-pill-green">${safuTokens.length}</span>
           </div>
           <div class="card-list">
