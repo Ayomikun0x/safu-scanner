@@ -6,8 +6,9 @@ const blockscout = require("./explorers/blockscout");
 const etherscan = require("./explorers/etherscan");
 const telegram = require("./telegram");
 
+// Simple in-memory cache for ETH/USD so we don't hit the price API on every token.
 let ethPriceCache = { value: null, fetchedAt: 0 };
-const ETH_PRICE_TTL_MS = 5 * 60 * 1000;
+const ETH_PRICE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 async function getEthUsdPrice() {
   const now = Date.now();
@@ -38,15 +39,50 @@ function formatCompactUsd(value) {
   return `$${value.toFixed(6)}`;
 }
 
+// Function name fragments that, if present in a verified contract's ABI,
+// mean the owner/deployer can do something that puts your funds at risk.
 const RISKY_FUNCTION_KEYWORDS = [
-  "mint", "blacklist", "blocklist", "pause", "freeze", "setfee",
-  "excludefromfee", "setmaxtx", "setmaxwallet", "rescuetoken",
-  "withdrawtoken", "setrouter",
+  "mint",
+  "blacklist",
+  "blocklist",
+  "pause",
+  "freeze",
+  "setfee",
+  "excludefromfee",
+  "setmaxtx",
+  "setmaxwallet",
+  "rescuetoken",
+  "withdrawtoken",
+  "setrouter",
 ];
 
+// Function name fragments that, if present in a *locker* contract's verified
+// source, suggest the deployer (or some privileged role) can pull the LP
+// tokens out before the stated unlock time -- i.e. the "lock" isn't really
+// enforced by the contract, just by convention. This is a heuristic on
+// function names, same limitation as RISKY_FUNCTION_KEYWORDS above: it can't
+// tell whether a function is actually reachable/gated, only that it exists.
+const LOCKER_RISK_KEYWORDS = [
+  "emergencywithdraw",
+  "emergencyexit",
+  "forceunlock",
+  "forcewithdraw",
+  "adminwithdraw",
+  "adminunlock",
+  "ownerwithdraw",
+  "ownerunlock",
+  "backdoor",
+  "rescue",
+  "overrideunlock",
+  "bypasslock",
+];
+
+// EIP-1967 standard storage slot where upgradeable (proxy) contracts store
+// their real logic address. Works the same way on any EVM chain.
 const EIP1967_IMPLEMENTATION_SLOT =
   "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bb";
 
+// Chunk eth_getLogs calls so we don't blow past provider block-range limits.
 const DEFAULT_LOG_CHUNK_SIZE = 2000;
 
 async function getLogsChunked(contract, eventFilter, fromBlock, toBlock, chunkSize = DEFAULT_LOG_CHUNK_SIZE) {
@@ -65,6 +101,8 @@ async function getLogsChunked(contract, eventFilter, fromBlock, toBlock, chunkSi
   return allLogs;
 }
 
+// Cache one ethers provider + contract set per network so we don't recreate
+// them on every single token check.
 const networkContext = new Map();
 
 function getContext(network) {
@@ -110,6 +148,39 @@ async function checkIsProxy(network, address) {
   }
 }
 
+// Locker contracts are reused across every token that locks LP with the same
+// service (e.g. Pons), so we only ever need to check each locker *address*
+// once per process lifetime -- cache the result instead of re-hitting the
+// explorer API on every single token that happens to use it.
+const lockerSafetyCache = new Map(); // key: `${network.key}:${lockerAddress}`
+
+async function checkLockerContractSafety(network, lockerAddress) {
+  const cacheKey = `${network.key}:${lockerAddress.toLowerCase()}`;
+  if (lockerSafetyCache.has(cacheKey)) {
+    return lockerSafetyCache.get(cacheKey);
+  }
+
+  let result;
+  try {
+    const client = getExplorerClient(network);
+    const verification = await client.checkContractVerification(network, lockerAddress);
+    if (!verification.verified) {
+      result = { verified: false, hasEarlyExitRisk: false, riskyFunctions: [] };
+    } else {
+      const riskyFunctions = LOCKER_RISK_KEYWORDS.filter((kw) =>
+        (verification.abiText || "").includes(kw)
+      );
+      result = { verified: true, hasEarlyExitRisk: riskyFunctions.length > 0, riskyFunctions };
+    }
+  } catch (err) {
+    console.error("Locker safety check failed:", err.message);
+    result = { verified: false, hasEarlyExitRisk: false, riskyFunctions: [] };
+  }
+
+  lockerSafetyCache.set(cacheKey, result);
+  return result;
+}
+
 async function findLpLockStatus(network, poolAddress, fromBlock) {
   const { provider, positionManager } = getContext(network);
   try {
@@ -139,17 +210,33 @@ async function findLpLockStatus(network, poolAddress, fromBlock) {
 
       const currentOwner = (await positionManager.ownerOf(tokenId)).toLowerCase();
       if (config.burnAddresses.has(currentOwner)) {
-        return { status: "burned", owner: currentOwner };
+        return { status: "burned", owner: currentOwner, lockerVerified: null, lockerRiskyFunctions: [] };
       }
       if (network.knownLockerContracts.has(currentOwner)) {
-        return { status: "locked", owner: currentOwner };
+        const safety = await checkLockerContractSafety(network, currentOwner);
+        let status;
+        if (!safety.verified) {
+          // Known locker address, but we can't read its source to confirm
+          // the lock actually holds -- don't blindly call this "locked".
+          status = "locked-unverified";
+        } else if (safety.hasEarlyExitRisk) {
+          status = "locked-risky";
+        } else {
+          status = "locked";
+        }
+        return {
+          status,
+          owner: currentOwner,
+          lockerVerified: safety.verified,
+          lockerRiskyFunctions: safety.riskyFunctions,
+        };
       }
-      return { status: "unlocked", owner: currentOwner };
+      return { status: "unlocked", owner: currentOwner, lockerVerified: null, lockerRiskyFunctions: [] };
     }
   } catch (err) {
     console.error("LP lock check failed:", err.message);
   }
-  return { status: "unknown", owner: null };
+  return { status: "unknown", owner: null, lockerVerified: null, lockerRiskyFunctions: [] };
 }
 
 async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolAddress, blockNumber) {
@@ -171,13 +258,16 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
       token.balanceOf(poolAddress).catch(() => 0n),
     ]);
 
-  const verification = await checkContractVerification(network, newTokenAddress);
-  const isProxy = await checkIsProxy(network, newTokenAddress);
-
+  // These four checks are all independent of each other (and of the block
+  // data above), so run them concurrently instead of one after another --
+  // this is the main thing slowing down how fast a fresh SAFU alert fires.
   const client = getExplorerClient(network);
-  const topHolderRaw = await client.fetchTopHolderPct(network, newTokenAddress, poolAddress);
-
-  const lpLock = await findLpLockStatus(network, poolAddress, blockNumber);
+  const [verification, isProxy, topHolderRaw, lpLock] = await Promise.all([
+    checkContractVerification(network, newTokenAddress),
+    checkIsProxy(network, newTokenAddress),
+    client.fetchTopHolderPct(network, newTokenAddress, poolAddress),
+    findLpLockStatus(network, poolAddress, blockNumber),
+  ]);
 
   const baseLiquidityFormatted = Number(ethers.formatUnits(baseBalanceInPool, 18));
   const newTokenReserveFormatted = Number(ethers.formatUnits(newTokenBalanceInPool, decimals));
@@ -233,6 +323,8 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
     topHolderDataAvailable: topHolderRaw.available !== false,
     lpLockStatus: lpLock.status,
     lpOwner: lpLock.owner,
+    lpLockerVerified: lpLock.lockerVerified,
+    lpLockerRiskyFunctions: lpLock.lockerRiskyFunctions,
     isSafu,
     blockNumber,
     launchedAt,
@@ -251,7 +343,7 @@ async function refreshKnownTokenPrices(network) {
     await Promise.allSettled(
       batch.map(async (record) => {
         try {
-          if (!record.baseTokenAddress) return;
+          if (!record.baseTokenAddress) return; // older record from before this field existed
 
           const token = new ethers.Contract(record.tokenAddress, ERC20_ABI, provider);
           const baseToken = new ethers.Contract(record.baseTokenAddress, ERC20_ABI, provider);
@@ -400,7 +492,7 @@ async function scanNetwork(network) {
         const record = result.value;
         if (record.isSafu) {
           record.alertedAt = Date.now();
-          telegram.sendSafuAlert(record);
+          telegram.sendSafuAlert(record); // fire-and-forget, errors logged internally
         }
         db.upsertToken(record);
         newTokenCount += 1;
