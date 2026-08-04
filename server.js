@@ -3,7 +3,7 @@ const express = require("express");
 const session = require("express-session");
 const config = require("./config");
 const db = require("./db");
-const { scanOnce } = require("./scanner");
+const { scanOnce, forceResetScanLock } = require("./scanner");
 const { withTimeout } = require("./utils/withTimeout");
 const app = express();
 app.use(express.json());
@@ -64,9 +64,15 @@ async function runScanLoop() {
     const result = await withTimeout(scanOnce(), 4 * 60 * 1000, "scanOnce");
     const durationSec = ((Date.now() - startedAt) / 1000).toFixed(1);
     console.log(`Scan complete in ${durationSec}s: ${result.scanned} pools checked, ${result.newTokens} new tokens recorded`);
-  } catch (err) {
+} catch (err) {
     const durationSec = ((Date.now() - startedAt) / 1000).toFixed(1);
     console.error(`Scheduled scan failed after ${durationSec}s:`, err.message);
+    if (err.message.includes("timed out")) {
+      // The outer ceiling tripped -- scanOnce's promise is abandoned, not
+      // resolved, so its own scanInProgress=false (in the finally block)
+      // never ran. Force it back open so the next cycle isn't blocked.
+      forceResetScanLock();
+    }
   }
   setTimeout(runScanLoop, config.scanIntervalMinutes * 60 * 1000);
 }
