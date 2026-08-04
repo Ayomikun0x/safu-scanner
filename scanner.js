@@ -7,9 +7,8 @@ const etherscan = require("./explorers/etherscan");
 const telegram = require("./telegram");
 const { withTimeout, fetchJsonWithTimeout } = require("./utils/withTimeout");
 
-// Simple in-memory cache for ETH/USD so we don't hit the price API on every token.
 let ethPriceCache = { value: null, fetchedAt: 0 };
-const ETH_PRICE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const ETH_PRICE_TTL_MS = 5 * 60 * 1000;
 
 async function getEthUsdPrice() {
   const now = Date.now();
@@ -36,52 +35,26 @@ function formatCompactUsd(value) {
 }
 
 const RISKY_FUNCTION_KEYWORDS = [
-  "mint",
-  "blacklist",
-  "blocklist",
-  "pause",
-  "freeze",
-  "setfee",
-  "excludefromfee",
-  "setmaxtx",
-  "setmaxwallet",
-  "rescuetoken",
-  "withdrawtoken",
-  "setrouter",
+  "mint", "blacklist", "blocklist", "pause", "freeze", "setfee",
+  "excludefromfee", "setmaxtx", "setmaxwallet", "rescuetoken",
+  "withdrawtoken", "setrouter",
 ];
 
 const LOCKER_RISK_KEYWORDS = [
-  "emergencywithdraw",
-  "emergencyexit",
-  "forceunlock",
-  "forcewithdraw",
-  "adminwithdraw",
-  "adminunlock",
-  "ownerwithdraw",
-  "ownerunlock",
-  "backdoor",
-  "rescue",
-  "overrideunlock",
-  "bypasslock",
+  "emergencywithdraw", "emergencyexit", "forceunlock", "forcewithdraw",
+  "adminwithdraw", "adminunlock", "ownerwithdraw", "ownerunlock",
+  "backdoor", "rescue", "overrideunlock", "bypasslock",
 ];
 
 const SPOOF_KEYWORDS = [
-  "safu",
-  "verified",
-  "audited",
-  "audit",
-  "locked",
-  "renounced",
-  "official",
-  "dyor",
-  "rug",
-  "scam",
-  "legit",
+  "safu", "verified", "audited", "audit", "locked", "renounced",
+  "official", "dyor", "rug", "scam", "legit",
 ];
 
 const MAX_NAME_LENGTH = 40;
 const MAX_SYMBOL_LENGTH = 15;
 const MAX_RECHECK_ATTEMPTS = 5;
+const LIQUIDITY_COLLAPSE_RATIO = 0.2; // liquidity dropping below 20% of its peak
 
 function sanitizeIdentity(raw, maxLength) {
   const str = String(raw || "").trim();
@@ -96,6 +69,11 @@ function looksSpoofed(name, symbol) {
 
 const EIP1967_IMPLEMENTATION_SLOT =
   "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bb";
+
+// Minimal extra ABI fragments -- these don't need to touch abis.js since
+// they're only used here for a couple of narrow, standard-pattern reads.
+const OWNERSHIP_ABI = ["function owner() view returns (address)"];
+const TRANSFER_EVENT_ABI = ["event Transfer(address indexed from, address indexed to, uint256 value)"];
 
 const DEFAULT_LOG_CHUNK_SIZE = 2000;
 
@@ -146,13 +124,8 @@ function getExplorerClient(network) {
 async function checkContractVerification(network, address) {
   const client = getExplorerClient(network);
   const result = await client.checkContractVerification(network, address);
-
-  if (result.rateLimited) {
-    return { verified: null, riskyFunctions: [], rateLimited: true };
-  }
-  if (!result.verified) {
-    return { verified: false, riskyFunctions: [], rateLimited: false };
-  }
+  if (result.rateLimited) return { verified: null, riskyFunctions: [], rateLimited: true };
+  if (!result.verified) return { verified: false, riskyFunctions: [], rateLimited: false };
 
   const riskyFunctions = RISKY_FUNCTION_KEYWORDS.filter((kw) =>
     (result.abiText || "").includes(kw)
@@ -174,17 +147,68 @@ async function checkIsProxy(network, address) {
   }
 }
 
-// Locker safety results are cached per address -- EXCEPT rate-limited
-// results, which are deliberately not cached, so a temporary explorer
-// rate-limit can't permanently poison every future token that reuses the
-// same locker.
-const lockerSafetyCache = new Map(); // key: `${network.key}:${lockerAddress}`
+// Returns true (renounced), false (still owned), or null (contract doesn't
+// use this pattern / call failed -- genuinely unknown, doesn't count against
+// the token since plenty of legitimate contracts don't implement owner()).
+async function checkOwnershipRenounced(network, address) {
+  try {
+    const { provider } = getContext(network);
+    const contract = new ethers.Contract(address, OWNERSHIP_ABI, provider);
+    const owner = await withTimeout(contract.owner(), 12000, "owner()");
+    return owner.toLowerCase() === ethers.ZeroAddress.toLowerCase();
+  } catch (err) {
+    return null;
+  }
+}
+
+// Looks at the token's own Transfer events in the first few blocks after
+// launch to see whether a small cluster of wallets scooped up an outsized
+// share of supply almost instantly -- a common way to work around a
+// single-address top-holder check by splitting control across several
+// wallets. Returns pct=null when the check itself couldn't run (doesn't
+// block SAFU); pct=0 when it ran cleanly and found no meaningful early
+// concentration.
+async function findEarlySnipers(network, tokenAddress, poolAddress, launchBlock, totalSupplyFormatted, decimals) {
+  try {
+    const { provider } = getContext(network);
+    const tokenEvents = new ethers.Contract(tokenAddress, TRANSFER_EVENT_ABI, provider);
+    const toBlock = launchBlock + config.earlySniperWindowBlocks;
+    const filter = tokenEvents.filters.Transfer();
+    const logs = await getLogsChunked(tokenEvents, filter, launchBlock, toBlock, network.logChunkSize);
+
+    const excluded = new Set([
+      poolAddress.toLowerCase(),
+      ethers.ZeroAddress.toLowerCase(),
+      "0x000000000000000000000000000000000000dead",
+    ]);
+
+    const received = new Map();
+    for (const log of logs) {
+      const to = log.args.to.toLowerCase();
+      if (excluded.has(to)) continue;
+      const amount = Number(ethers.formatUnits(log.args.value, decimals));
+      received.set(to, (received.get(to) || 0) + amount);
+    }
+
+    if (totalSupplyFormatted <= 0 || received.size === 0) {
+      return { pct: 0, wallets: 0, windowBlocks: config.earlySniperWindowBlocks };
+    }
+
+    const sorted = [...received.values()].sort((a, b) => b - a);
+    const topFew = sorted.slice(0, 3).reduce((sum, v) => sum + v, 0);
+    const pct = (topFew / totalSupplyFormatted) * 100;
+
+    return { pct, wallets: received.size, windowBlocks: config.earlySniperWindowBlocks };
+  } catch (err) {
+    return { pct: null, wallets: null, windowBlocks: config.earlySniperWindowBlocks };
+  }
+}
+
+const lockerSafetyCache = new Map();
 
 async function checkLockerContractSafety(network, lockerAddress) {
   const cacheKey = `${network.key}:${lockerAddress.toLowerCase()}`;
-  if (lockerSafetyCache.has(cacheKey)) {
-    return lockerSafetyCache.get(cacheKey);
-  }
+  if (lockerSafetyCache.has(cacheKey)) return lockerSafetyCache.get(cacheKey);
 
   let result;
   try {
@@ -246,36 +270,14 @@ async function findLpLockStatus(network, poolAddress, fromBlock) {
       }
       if (network.knownLockerContracts.has(currentOwner)) {
         const safety = await checkLockerContractSafety(network, currentOwner);
-
         if (safety.rateLimited) {
-          // Known locker, but we couldn't confirm its source this cycle due
-          // to a rate limit -- not the same as "unverified", so it gets its
-          // own status and a retry on the next refresh cycle instead of a
-          // permanent verdict.
-          return {
-            status: "locked-recheck-needed",
-            owner: currentOwner,
-            lockerVerified: null,
-            lockerRiskyFunctions: [],
-            rateLimitedLocker: true,
-          };
+          return { status: "locked-recheck-needed", owner: currentOwner, lockerVerified: null, lockerRiskyFunctions: [], rateLimitedLocker: true };
         }
-
         let status;
-        if (!safety.verified) {
-          status = "locked-unverified";
-        } else if (safety.hasEarlyExitRisk) {
-          status = "locked-risky";
-        } else {
-          status = "locked";
-        }
-        return {
-          status,
-          owner: currentOwner,
-          lockerVerified: safety.verified,
-          lockerRiskyFunctions: safety.riskyFunctions,
-          rateLimitedLocker: false,
-        };
+        if (!safety.verified) status = "locked-unverified";
+        else if (safety.hasEarlyExitRisk) status = "locked-risky";
+        else status = "locked";
+        return { status, owner: currentOwner, lockerVerified: safety.verified, lockerRiskyFunctions: safety.riskyFunctions, rateLimitedLocker: false };
       }
       return { status: "unlocked", owner: currentOwner, lockerVerified: null, lockerRiskyFunctions: [], rateLimitedLocker: false };
     }
@@ -289,12 +291,9 @@ function isLpTrulyLocked(lpLockStatus) {
   return lpLockStatus === "locked" || lpLockStatus === "burned";
 }
 
-// Runs the four independent safety checks and reports whether any of them
-// hit a rate limit -- used both for a brand-new token's first analysis and
-// for re-attempting a previously rate-limited token on a later cycle.
-async function runSafetyChecks(network, tokenAddress, poolAddress, blockNumber) {
+async function runSafetyChecks(network, tokenAddress, poolAddress, blockNumber, totalSupplyFormatted, decimals) {
   const client = getExplorerClient(network);
-  const [verification, isProxy, topHolderRaw, lpLock] = await Promise.all([
+  const [verification, isProxy, topHolderRaw, lpLock, ownershipRenounced, creatorResult, earlySnipers] = await Promise.all([
     withTimeout(checkContractVerification(network, tokenAddress), 20000, "checkContractVerification")
       .catch(() => ({ verified: false, riskyFunctions: [], rateLimited: false })),
     withTimeout(checkIsProxy(network, tokenAddress), 15000, "checkIsProxy").catch(() => false),
@@ -302,14 +301,22 @@ async function runSafetyChecks(network, tokenAddress, poolAddress, blockNumber) 
       .catch(() => ({ pct: null, holder: null, available: false, rateLimited: false })),
     withTimeout(findLpLockStatus(network, poolAddress, blockNumber), 25000, "findLpLockStatus")
       .catch(() => ({ status: "unknown", owner: null, lockerVerified: null, lockerRiskyFunctions: [], rateLimitedLocker: false })),
+    withTimeout(checkOwnershipRenounced(network, tokenAddress), 15000, "checkOwnershipRenounced").catch(() => null),
+    withTimeout(client.getContractCreator(network, tokenAddress), 15000, "getContractCreator")
+      .catch(() => ({ creator: null, rateLimited: false })),
+    withTimeout(
+      findEarlySnipers(network, tokenAddress, poolAddress, blockNumber, totalSupplyFormatted, decimals),
+      20000, "findEarlySnipers"
+    ).catch(() => ({ pct: null, wallets: null, windowBlocks: config.earlySniperWindowBlocks })),
   ]);
 
   const rateLimitedAny =
     verification.rateLimited === true ||
     topHolderRaw.rateLimited === true ||
-    lpLock.rateLimitedLocker === true;
+    lpLock.rateLimitedLocker === true ||
+    creatorResult.rateLimited === true;
 
-  return { verification, isProxy, topHolderRaw, lpLock, rateLimitedAny };
+  return { verification, isProxy, topHolderRaw, lpLock, ownershipRenounced, creatorResult, earlySnipers, rateLimitedAny };
 }
 
 async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolAddress, blockNumber) {
@@ -325,14 +332,8 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
 
   const [rawName, rawSymbol, decimals, totalSupply, baseBalanceInPool, baseSymbol, newTokenBalanceInPool] =
     await Promise.all([
-      withTimeout(token.name(), 15000, "token.name").catch(() => {
-        nameOk = false;
-        return "Unknown";
-      }),
-      withTimeout(token.symbol(), 15000, "token.symbol").catch(() => {
-        symbolOk = false;
-        return "???";
-      }),
+      withTimeout(token.name(), 15000, "token.name").catch(() => { nameOk = false; return "Unknown"; }),
+      withTimeout(token.symbol(), 15000, "token.symbol").catch(() => { symbolOk = false; return "???"; }),
       withTimeout(token.decimals(), 15000, "token.decimals").catch(() => 18),
       withTimeout(token.totalSupply(), 15000, "token.totalSupply").catch(() => 0n),
       withTimeout(baseToken.balanceOf(poolAddress), 15000, "baseToken.balanceOf").catch(() => 0n),
@@ -343,48 +344,36 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
   const name = sanitizeIdentity(rawName, MAX_NAME_LENGTH);
   const symbol = sanitizeIdentity(rawSymbol, MAX_SYMBOL_LENGTH);
   const spoofedIdentity = looksSpoofed(name, symbol);
+  const totalSupplyFormatted = Number(ethers.formatUnits(totalSupply, decimals));
 
-  const { verification, isProxy, topHolderRaw, lpLock, rateLimitedAny } = await runSafetyChecks(
-    network,
-    newTokenAddress,
-    poolAddress,
-    blockNumber
-  );
+  const { verification, isProxy, topHolderRaw, lpLock, ownershipRenounced, creatorResult, earlySnipers, rateLimitedAny } =
+    await runSafetyChecks(network, newTokenAddress, poolAddress, blockNumber, totalSupplyFormatted, decimals);
+
+  const deployerAddress = creatorResult.creator;
+  const deployerRecord = deployerAddress ? db.getDeployerRecord(deployerAddress) : { totalLaunches: 0, ruggedCount: 0 };
 
   const baseLiquidityFormatted = Number(ethers.formatUnits(baseBalanceInPool, 18));
   const newTokenReserveFormatted = Number(ethers.formatUnits(newTokenBalanceInPool, decimals));
-  const totalSupplyFormatted = Number(ethers.formatUnits(totalSupply, decimals));
 
   let priceUsd = null;
   let marketCapUsd = null;
 
   if (newTokenReserveFormatted > 0) {
     const priceInBase = baseLiquidityFormatted / newTokenReserveFormatted;
-
     if (network.usdStableBases.has(baseTokenAddress.toLowerCase())) {
       priceUsd = priceInBase;
     } else {
       const ethUsd = await getEthUsdPrice();
       if (ethUsd) priceUsd = priceInBase * ethUsd;
     }
-
-    if (priceUsd !== null) {
-      marketCapUsd = priceUsd * totalSupplyFormatted;
-    }
+    if (priceUsd !== null) marketCapUsd = priceUsd * totalSupplyFormatted;
   }
 
- // If this chain's explorer genuinely can't give us top-holder data (a
-  // real limitation, e.g. Etherscan's holder-list being paid-plan-only on
-  // some chains, or Blockscout not returning a usable response), don't let
-  // an unmeasurable signal block SAFU forever -- skip this one criterion,
-  // but the token stays clearly flagged everywhere as "top holder
-  // unconfirmed" via topHolderDataAvailable, so nothing is silently assumed
-  // safe. If data WAS available and pct is still null, that's a genuine
-  // failure worth blocking on, not a known limitation.
   const topHolderOk =
-    topHolderRaw.available === false
-      ? true
-      : topHolderRaw.pct !== null && topHolderRaw.pct < config.safuMaxDeployerPct;
+    topHolderRaw.available === false ? true : topHolderRaw.pct !== null && topHolderRaw.pct < config.safuMaxDeployerPct;
+  const ownershipOk = ownershipRenounced !== false;
+  const deployerOk = deployerRecord.ruggedCount === 0;
+  const snipingOk = earlySnipers.pct === null ? true : earlySnipers.pct < config.safuMaxEarlyConcentrationPct;
 
   const isSafu =
     verification.verified === true &&
@@ -392,10 +381,11 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
     !isProxy &&
     topHolderOk &&
     baseLiquidityFormatted >= config.safuMinLiquidityEth &&
-    nameOk &&
-    symbolOk &&
-    !spoofedIdentity &&
-    isLpTrulyLocked(lpLock.status);
+    nameOk && symbolOk && !spoofedIdentity &&
+    isLpTrulyLocked(lpLock.status) &&
+    ownershipOk &&
+    deployerOk &&
+    snipingOk;
 
   return {
     chain: network.key,
@@ -403,19 +393,14 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
     explorerAddressBase: network.explorerAddressBase,
     uniswapPoolUrlBase: network.uniswapPoolUrlBase,
     tokenAddress: newTokenAddress.toLowerCase(),
-    name,
-    symbol,
-    nameOk,
-    symbolOk,
-    spoofedIdentity,
+    name, symbol, nameOk, symbolOk, spoofedIdentity,
     decimals: Number(decimals),
     totalSupply: totalSupply.toString(),
     poolAddress: poolAddress.toLowerCase(),
     baseTokenAddress: baseTokenAddress.toLowerCase(),
     baseSymbol,
     baseLiquidity: baseLiquidityFormatted,
-    priceUsd,
-    marketCapUsd,
+    priceUsd, marketCapUsd,
     verified: verification.verified === true,
     riskyFunctions: verification.riskyFunctions,
     isProxy,
@@ -426,12 +411,19 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
     lpOwner: lpLock.owner,
     lpLockerVerified: lpLock.lockerVerified,
     lpLockerRiskyFunctions: lpLock.lockerRiskyFunctions,
+    ownershipRenounced,
+    deployerAddress,
+    deployerLaunches: deployerRecord.totalLaunches,
+    deployerRuggedCount: deployerRecord.ruggedCount,
+    earlySniperPct: earlySnipers.pct,
+    earlySniperWallets: earlySnipers.wallets,
     isSafu,
     needsRecheck: rateLimitedAny,
     recheckAttempts: 0,
-    blockNumber,
-    launchedAt,
-    scannedAt: Date.now(),
+    peakLiquidity: baseLiquidityFormatted,
+    wasEverLocked: isLpTrulyLocked(lpLock.status),
+    ruggedFlagged: false,
+    blockNumber, launchedAt, scannedAt: Date.now(),
   };
 }
 
@@ -446,7 +438,7 @@ async function refreshKnownTokenPrices(network) {
     await Promise.allSettled(
       batch.map(async (record) => {
         try {
-          if (!record.baseTokenAddress) return; // older record from before this field existed
+          if (!record.baseTokenAddress) return;
 
           const token = new ethers.Contract(record.tokenAddress, ERC20_ABI, provider);
           const baseToken = new ethers.Contract(record.baseTokenAddress, ERC20_ABI, provider);
@@ -458,17 +450,12 @@ async function refreshKnownTokenPrices(network) {
 
           if (newTokenBalanceInPool === null || baseBalanceInPool === null) return;
 
-          const newTokenReserveFormatted = Number(
-            ethers.formatUnits(newTokenBalanceInPool, record.decimals)
-          );
+          const newTokenReserveFormatted = Number(ethers.formatUnits(newTokenBalanceInPool, record.decimals));
           const baseLiquidityFormatted = Number(ethers.formatUnits(baseBalanceInPool, 18));
-
           if (newTokenReserveFormatted <= 0) return;
 
           const priceInBase = baseLiquidityFormatted / newTokenReserveFormatted;
-          const totalSupplyFormatted = Number(
-            ethers.formatUnits(record.totalSupply, record.decimals)
-          );
+          const totalSupplyFormatted = Number(ethers.formatUnits(record.totalSupply, record.decimals));
 
           let priceUsd = null;
           if (network.usdStableBases.has(record.baseTokenAddress)) {
@@ -477,24 +464,13 @@ async function refreshKnownTokenPrices(network) {
             const ethUsd = await getEthUsdPrice();
             if (ethUsd) priceUsd = priceInBase * ethUsd;
           }
-
           const marketCapUsd = priceUsd !== null ? priceUsd * totalSupplyFormatted : null;
 
           let updatedRecord = { ...record, baseLiquidity: baseLiquidityFormatted, priceUsd, marketCapUsd };
 
-          // If this token's original analysis got rate-limited, retry the
-          // FULL safety check (not just price) here -- this loop already
-          // runs every scan cycle, so a temporary rate-limit now gets a real
-          // second (third, fourth...) chance instead of being stuck wrong
-          // forever, up to a small attempt cap so a persistently-broken
-          // lookup doesn't retry indefinitely.
           if (record.needsRecheck && (record.recheckAttempts || 0) < MAX_RECHECK_ATTEMPTS) {
-            const { verification, isProxy, topHolderRaw, lpLock, rateLimitedAny } = await runSafetyChecks(
-              network,
-              record.tokenAddress,
-              record.poolAddress,
-              record.blockNumber
-            );
+            const { verification, isProxy, topHolderRaw, lpLock, ownershipRenounced, creatorResult, earlySnipers, rateLimitedAny } =
+              await runSafetyChecks(network, record.tokenAddress, record.poolAddress, record.blockNumber, totalSupplyFormatted, record.decimals);
 
             updatedRecord = {
               ...updatedRecord,
@@ -508,25 +484,53 @@ async function refreshKnownTokenPrices(network) {
               lpOwner: lpLock.owner,
               lpLockerVerified: lpLock.lockerVerified,
               lpLockerRiskyFunctions: lpLock.lockerRiskyFunctions,
+              ownershipRenounced,
+              deployerAddress: creatorResult.creator || record.deployerAddress,
+              earlySniperPct: earlySnipers.pct,
+              earlySniperWallets: earlySnipers.wallets,
               needsRecheck: rateLimitedAny,
               recheckAttempts: (record.recheckAttempts || 0) + 1,
             };
-
-            if (!rateLimitedAny) {
-              console.log(
-                `[${network.label}] Recheck resolved for ${record.symbol} (${record.tokenAddress}) after ${updatedRecord.recheckAttempts} attempt(s)`
-              );
-            } else if (updatedRecord.recheckAttempts >= MAX_RECHECK_ATTEMPTS) {
-              console.warn(
-                `[${network.label}] Giving up recheck for ${record.symbol} (${record.tokenAddress}) after ${MAX_RECHECK_ATTEMPTS} attempts -- explorer still rate-limiting`
-              );
-            }
           }
 
-const topHolderOk =
+          // Peak liquidity + lock history, used to detect a later rug: a
+          // sudden liquidity collapse, or a previously-locked/burned LP
+          // getting pulled.
+          const peakLiquidity = Math.max(record.peakLiquidity || 0, baseLiquidityFormatted);
+          const wasEverLocked = record.wasEverLocked || isLpTrulyLocked(record.lpLockStatus);
+          updatedRecord.peakLiquidity = peakLiquidity;
+          updatedRecord.wasEverLocked = wasEverLocked;
+
+          const nowLocked = isLpTrulyLocked(updatedRecord.lpLockStatus);
+          const liquidityCollapsed =
+            peakLiquidity >= config.safuMinLiquidityEth && baseLiquidityFormatted < peakLiquidity * LIQUIDITY_COLLAPSE_RATIO;
+          const lockPulled = wasEverLocked && !nowLocked;
+
+          if ((liquidityCollapsed || lockPulled) && !record.ruggedFlagged && record.deployerAddress) {
+            const tokenKey = `${record.chain}:${record.tokenAddress}`;
+            db.markDeployerRugged(record.deployerAddress, tokenKey);
+            updatedRecord.ruggedFlagged = true;
+            console.warn(`[${network.label}] Flagged ${record.symbol} (${record.tokenAddress}) as rugged -- deployer ${record.deployerAddress} reputation updated.`);
+          } else {
+            updatedRecord.ruggedFlagged = record.ruggedFlagged || false;
+          }
+
+          const deployerRecord = updatedRecord.deployerAddress
+            ? db.getDeployerRecord(updatedRecord.deployerAddress)
+            : { totalLaunches: 0, ruggedCount: 0 };
+          updatedRecord.deployerLaunches = deployerRecord.totalLaunches;
+          updatedRecord.deployerRuggedCount = deployerRecord.ruggedCount;
+
+          const topHolderOk =
             updatedRecord.topHolderDataAvailable === false
               ? true
               : updatedRecord.topHolderPct !== null && updatedRecord.topHolderPct < config.safuMaxDeployerPct;
+          const ownershipOk = updatedRecord.ownershipRenounced !== false;
+          const deployerOk = deployerRecord.ruggedCount === 0;
+          const snipingOk =
+            updatedRecord.earlySniperPct === null || updatedRecord.earlySniperPct === undefined
+              ? true
+              : updatedRecord.earlySniperPct < config.safuMaxEarlyConcentrationPct;
 
           const newIsSafu =
             updatedRecord.verified === true &&
@@ -537,7 +541,8 @@ const topHolderOk =
             updatedRecord.nameOk !== false &&
             updatedRecord.symbolOk !== false &&
             !updatedRecord.spoofedIdentity &&
-            isLpTrulyLocked(updatedRecord.lpLockStatus);
+            isLpTrulyLocked(updatedRecord.lpLockStatus) &&
+            ownershipOk && deployerOk && snipingOk;
 
           updatedRecord.isSafu = newIsSafu;
 
@@ -563,44 +568,27 @@ async function scanNetwork(network) {
   await refreshKnownTokenPrices(network);
 
   const lastScanned = db.getLastScannedBlock(network.key);
-  const fromBlock = lastScanned
-    ? lastScanned + 1
-    : Math.max(0, currentBlock - network.initialLookbackBlocks);
+  const fromBlock = lastScanned ? lastScanned + 1 : Math.max(0, currentBlock - network.initialLookbackBlocks);
 
-  if (fromBlock > currentBlock) {
-    return { network: network.key, scanned: 0, newTokens: 0 };
-  }
+  if (fromBlock > currentBlock) return { network: network.key, scanned: 0, newTokens: 0 };
 
-  console.log(
-    `[${network.label}] Scanning blocks ${fromBlock} -> ${currentBlock} (${currentBlock - fromBlock} blocks)`
-  );
+  console.log(`[${network.label}] Scanning blocks ${fromBlock} -> ${currentBlock} (${currentBlock - fromBlock} blocks)`);
   const filter = factory.filters.PoolCreated();
   const logs = await getLogsChunked(factory, filter, fromBlock, currentBlock, network.logChunkSize);
   console.log(`[${network.label}] Found ${logs.length} pool(s) created in this window`);
 
   let newTokenCount = 0;
   let skippedNotBasePair = 0;
-
   const candidates = [];
+
   for (const log of logs) {
     const { token0, token1, pool } = log.args;
     const t0 = token0.toLowerCase();
     const t1 = token1.toLowerCase();
-
     const t0IsBase = network.knownBaseTokens.has(t0);
     const t1IsBase = network.knownBaseTokens.has(t1);
-
-    if (t0IsBase === t1IsBase) {
-      skippedNotBasePair += 1;
-      continue;
-    }
-
-    candidates.push({
-      newToken: t0IsBase ? t1 : t0,
-      baseToken: t0IsBase ? t0 : t1,
-      pool,
-      blockNumber: log.blockNumber,
-    });
+    if (t0IsBase === t1IsBase) { skippedNotBasePair += 1; continue; }
+    candidates.push({ newToken: t0IsBase ? t1 : t0, baseToken: t0IsBase ? t0 : t1, pool, blockNumber: log.blockNumber });
   }
 
   const { provider: precheckProvider } = getContext(network);
@@ -613,9 +601,7 @@ async function scanNetwork(network) {
           const baseToken = new ethers.Contract(c.baseToken, ERC20_ABI, precheckProvider);
           const bal = await withTimeout(baseToken.balanceOf(c.pool), 15000, "precheck balanceOf");
           c.quickLiquidity = Number(ethers.formatUnits(bal, 18));
-        } catch {
-          c.quickLiquidity = 0;
-        }
+        } catch { c.quickLiquidity = 0; }
       })
     );
   }
@@ -626,20 +612,18 @@ async function scanNetwork(network) {
     const batch = candidates.slice(i, i + BATCH_SIZE);
     const results = await Promise.allSettled(
       batch.map((c) =>
-        withTimeout(
-          analyzeNewToken(network, c.newToken, c.baseToken, c.pool, c.blockNumber),
-          60000,
-          `analyzeNewToken ${c.newToken}`
-        )
+        withTimeout(analyzeNewToken(network, c.newToken, c.baseToken, c.pool, c.blockNumber), 60000, `analyzeNewToken ${c.newToken}`)
       )
     );
 
     results.forEach((result, idx) => {
       if (result.status === "fulfilled") {
         const record = result.value;
+        const tokenKey = `${record.chain}:${record.tokenAddress}`;
+        if (record.deployerAddress) db.recordDeployerLaunch(record.deployerAddress, tokenKey);
         if (record.isSafu) {
           record.alertedAt = Date.now();
-          telegram.sendSafuAlert(record); // fire-and-forget, errors logged internally
+          telegram.sendSafuAlert(record);
         }
         db.upsertToken(record);
         newTokenCount += 1;
@@ -651,11 +635,7 @@ async function scanNetwork(network) {
   }
 
   db.setLastScannedBlock(network.key, currentBlock);
-
-  console.log(
-    `[${network.label}] Scan summary: ${logs.length} pools found, ${skippedNotBasePair} skipped (wrong pair), ` +
-    `${newTokenCount} recorded`
-  );
+  console.log(`[${network.label}] Scan summary: ${logs.length} pools found, ${skippedNotBasePair} skipped (wrong pair), ${newTokenCount} recorded`);
 
   return { network: network.key, scanned: logs.length, newTokens: newTokenCount };
 }
@@ -663,9 +643,7 @@ async function scanNetwork(network) {
 let scanInProgress = false;
 
 function forceResetScanLock() {
-  if (scanInProgress) {
-    console.warn("Forcing scan lock reset -- previous scan was abandoned by the outer watchdog.");
-  }
+  if (scanInProgress) console.warn("Forcing scan lock reset -- previous scan was abandoned by the outer watchdog.");
   scanInProgress = false;
 }
 
@@ -677,17 +655,13 @@ async function scanOnce() {
 
   scanInProgress = true;
   try {
-    const settled = await Promise.allSettled(
-      config.networks.map((network) => scanNetwork(network))
-    );
-
+    const settled = await Promise.allSettled(config.networks.map((network) => scanNetwork(network)));
     const results = settled.map((outcome, i) => {
       const network = config.networks[i];
       if (outcome.status === "fulfilled") return outcome.value;
       console.error(`[${network.label}] Network scan failed:`, outcome.reason?.message);
       return { network: network.key, scanned: 0, newTokens: 0, error: outcome.reason?.message };
     });
-
     return {
       scanned: results.reduce((sum, r) => sum + r.scanned, 0),
       newTokens: results.reduce((sum, r) => sum + r.newTokens, 0),
