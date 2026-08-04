@@ -38,11 +38,25 @@ function lpBadge(status) {
   const map = {
     burned: ["badge-green", "Burned"],
     locked: ["badge-green", "Locked"],
+    "locked-risky": ["badge-red", "Locked (risky)"],
+    "locked-unverified": ["badge-amber", "Locked (unverified)"],
     unlocked: ["badge-red", "Unlocked"],
     unknown: ["badge-gray", "Unknown"],
   };
   const [cls, label] = map[status] || map.unknown;
   return `<span class="badge ${cls}">LP: ${label}</span>`;
+}
+function lpOwnerHint(t) {
+  if (t.lpLockStatus === "locked-risky" && t.lpLockerRiskyFunctions?.length) {
+    return `<span class="lp-owner-hint lp-owner-hint-risk">— locker contract exposes: ${t.lpLockerRiskyFunctions.join(", ")}</span>`;
+  }
+  if (t.lpLockStatus === "locked-unverified") {
+    return `<span class="lp-owner-hint">— locker contract source isn't verified, can't confirm the lock holds</span>`;
+  }
+  if (t.lpLockStatus === "locked") {
+    return `<span class="lp-owner-hint">— known locker, source checked, no early-exit functions found</span>`;
+  }
+  return `<span class="lp-owner-hint">— check if this is a wallet or a locker contract</span>`;
 }
 
 function verifiedBadge(verified) {
@@ -100,10 +114,10 @@ function renderCard(t, isNew) {
         ${holdingBadge(t)}
         ${lpBadge(t.lpLockStatus)}
       </div>
-      ${t.lpOwner ? `
+     ${t.lpOwner ? `
       <div class="lp-owner-row">
         LP holder: <a href="${t.explorerAddressBase}${t.lpOwner}" target="_blank" rel="noopener">${t.lpOwner.slice(0,6)}…${t.lpOwner.slice(-4)}</a>
-        <span class="lp-owner-hint">— check if this is a wallet or a locker contract</span>
+        ${lpOwnerHint(t)}
       </div>` : ""}
       <div class="card-links">
         <a href="${t.explorerAddressBase}${t.tokenAddress}" target="_blank" rel="noopener">Explorer</a>
