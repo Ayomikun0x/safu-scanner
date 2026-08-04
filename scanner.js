@@ -533,6 +533,17 @@ async function scanNetwork(network) {
 
 let scanInProgress = false;
 
+// Exposed so server.js's outer watchdog can force this back to false if a
+// scan ever gets abandoned by the outer timeout ceiling (the promise itself
+// keeps running in the background, but we stop waiting on it and treat the
+// lock as free again for the next scheduled cycle).
+function forceResetScanLock() {
+  if (scanInProgress) {
+    console.warn("Forcing scan lock reset -- previous scan was abandoned by the outer watchdog.");
+  }
+  scanInProgress = false;
+}
+
 async function scanOnce() {
   if (scanInProgress) {
     console.log("Scan already in progress, skipping this trigger.");
@@ -562,4 +573,4 @@ async function scanOnce() {
   }
 }
 
-module.exports = { scanOnce };
+module.exports = { scanOnce, forceResetScanLock };
