@@ -35,8 +35,6 @@ function formatCompactUsd(value) {
   return `$${value.toFixed(6)}`;
 }
 
-// Function name fragments that, if present in a verified contract's ABI,
-// mean the owner/deployer can do something that puts your funds at risk.
 const RISKY_FUNCTION_KEYWORDS = [
   "mint",
   "blacklist",
@@ -52,11 +50,6 @@ const RISKY_FUNCTION_KEYWORDS = [
   "setrouter",
 ];
 
-// Function name fragments that, if present in a *locker* contract's verified
-// source, suggest the deployer (or some privileged role) can pull the LP
-// tokens out before the stated unlock time -- i.e. the "lock" isn't really
-// enforced by the contract, just by convention. Same limitation as
-// RISKY_FUNCTION_KEYWORDS above: it's a name match, not proof of reachability.
 const LOCKER_RISK_KEYWORDS = [
   "emergencywithdraw",
   "emergencyexit",
@@ -72,11 +65,6 @@ const LOCKER_RISK_KEYWORDS = [
   "bypasslock",
 ];
 
-// Words/patterns malicious deployers put in a token's own name/symbol to
-// make it *look like* a scanner verdict, an audit claim, or a fake stat --
-// e.g. "DEX PAID KIMCHI OWNS 5% (CHROME)" is written specifically to read
-// like a legitimacy claim or warning once it shows up inside an alert. A
-// token doesn't get to write its own SAFU-sounding claims into our output.
 const SPOOF_KEYWORDS = [
   "safu",
   "verified",
@@ -93,6 +81,7 @@ const SPOOF_KEYWORDS = [
 
 const MAX_NAME_LENGTH = 40;
 const MAX_SYMBOL_LENGTH = 15;
+const MAX_RECHECK_ATTEMPTS = 5;
 
 function sanitizeIdentity(raw, maxLength) {
   const str = String(raw || "").trim();
@@ -101,16 +90,13 @@ function sanitizeIdentity(raw, maxLength) {
 
 function looksSpoofed(name, symbol) {
   const combined = `${name} ${symbol}`.toLowerCase();
-  if (/\d+\s*%/.test(combined)) return true; // fake percentage claims, e.g. "OWNS 5%"
+  if (/\d+\s*%/.test(combined)) return true;
   return SPOOF_KEYWORDS.some((kw) => combined.includes(kw));
 }
 
-// EIP-1967 standard storage slot where upgradeable (proxy) contracts store
-// their real logic address. Works the same way on any EVM chain.
 const EIP1967_IMPLEMENTATION_SLOT =
   "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bb";
 
-// Chunk eth_getLogs calls so we don't blow past provider block-range limits.
 const DEFAULT_LOG_CHUNK_SIZE = 2000;
 
 async function getLogsChunked(contract, eventFilter, fromBlock, toBlock, chunkSize = DEFAULT_LOG_CHUNK_SIZE) {
@@ -133,8 +119,6 @@ async function getLogsChunked(contract, eventFilter, fromBlock, toBlock, chunkSi
   return allLogs;
 }
 
-// Cache one ethers provider + contract set per network so we don't recreate
-// them on every single token check.
 const networkContext = new Map();
 
 function getContext(network) {
@@ -162,12 +146,18 @@ function getExplorerClient(network) {
 async function checkContractVerification(network, address) {
   const client = getExplorerClient(network);
   const result = await client.checkContractVerification(network, address);
-  if (!result.verified) return { verified: false, riskyFunctions: [] };
+
+  if (result.rateLimited) {
+    return { verified: null, riskyFunctions: [], rateLimited: true };
+  }
+  if (!result.verified) {
+    return { verified: false, riskyFunctions: [], rateLimited: false };
+  }
 
   const riskyFunctions = RISKY_FUNCTION_KEYWORDS.filter((kw) =>
     (result.abiText || "").includes(kw)
   );
-  return { verified: true, riskyFunctions };
+  return { verified: true, riskyFunctions, rateLimited: false };
 }
 
 async function checkIsProxy(network, address) {
@@ -184,10 +174,10 @@ async function checkIsProxy(network, address) {
   }
 }
 
-// Locker contracts are reused across every token that locks LP with the same
-// service (e.g. Pons), so we only ever need to check each locker *address*
-// once per process lifetime -- cache the result instead of re-hitting the
-// explorer API on every single token that happens to use it.
+// Locker safety results are cached per address -- EXCEPT rate-limited
+// results, which are deliberately not cached, so a temporary explorer
+// rate-limit can't permanently poison every future token that reuses the
+// same locker.
 const lockerSafetyCache = new Map(); // key: `${network.key}:${lockerAddress}`
 
 async function checkLockerContractSafety(network, lockerAddress) {
@@ -200,17 +190,20 @@ async function checkLockerContractSafety(network, lockerAddress) {
   try {
     const client = getExplorerClient(network);
     const verification = await client.checkContractVerification(network, lockerAddress);
+    if (verification.rateLimited) {
+      return { verified: null, hasEarlyExitRisk: false, riskyFunctions: [], rateLimited: true };
+    }
     if (!verification.verified) {
-      result = { verified: false, hasEarlyExitRisk: false, riskyFunctions: [] };
+      result = { verified: false, hasEarlyExitRisk: false, riskyFunctions: [], rateLimited: false };
     } else {
       const riskyFunctions = LOCKER_RISK_KEYWORDS.filter((kw) =>
         (verification.abiText || "").includes(kw)
       );
-      result = { verified: true, hasEarlyExitRisk: riskyFunctions.length > 0, riskyFunctions };
+      result = { verified: true, hasEarlyExitRisk: riskyFunctions.length > 0, riskyFunctions, rateLimited: false };
     }
   } catch (err) {
     console.error("Locker safety check failed:", err.message);
-    result = { verified: false, hasEarlyExitRisk: false, riskyFunctions: [] };
+    result = { verified: false, hasEarlyExitRisk: false, riskyFunctions: [], rateLimited: false };
   }
 
   lockerSafetyCache.set(cacheKey, result);
@@ -249,10 +242,25 @@ async function findLpLockStatus(network, poolAddress, fromBlock) {
       ).toLowerCase();
 
       if (config.burnAddresses.has(currentOwner)) {
-        return { status: "burned", owner: currentOwner, lockerVerified: null, lockerRiskyFunctions: [] };
+        return { status: "burned", owner: currentOwner, lockerVerified: null, lockerRiskyFunctions: [], rateLimitedLocker: false };
       }
       if (network.knownLockerContracts.has(currentOwner)) {
         const safety = await checkLockerContractSafety(network, currentOwner);
+
+        if (safety.rateLimited) {
+          // Known locker, but we couldn't confirm its source this cycle due
+          // to a rate limit -- not the same as "unverified", so it gets its
+          // own status and a retry on the next refresh cycle instead of a
+          // permanent verdict.
+          return {
+            status: "locked-recheck-needed",
+            owner: currentOwner,
+            lockerVerified: null,
+            lockerRiskyFunctions: [],
+            rateLimitedLocker: true,
+          };
+        }
+
         let status;
         if (!safety.verified) {
           status = "locked-unverified";
@@ -266,18 +274,42 @@ async function findLpLockStatus(network, poolAddress, fromBlock) {
           owner: currentOwner,
           lockerVerified: safety.verified,
           lockerRiskyFunctions: safety.riskyFunctions,
+          rateLimitedLocker: false,
         };
       }
-      return { status: "unlocked", owner: currentOwner, lockerVerified: null, lockerRiskyFunctions: [] };
+      return { status: "unlocked", owner: currentOwner, lockerVerified: null, lockerRiskyFunctions: [], rateLimitedLocker: false };
     }
   } catch (err) {
     console.error("LP lock check failed:", err.message);
   }
-  return { status: "unknown", owner: null, lockerVerified: null, lockerRiskyFunctions: [] };
+  return { status: "unknown", owner: null, lockerVerified: null, lockerRiskyFunctions: [], rateLimitedLocker: false };
 }
 
 function isLpTrulyLocked(lpLockStatus) {
   return lpLockStatus === "locked" || lpLockStatus === "burned";
+}
+
+// Runs the four independent safety checks and reports whether any of them
+// hit a rate limit -- used both for a brand-new token's first analysis and
+// for re-attempting a previously rate-limited token on a later cycle.
+async function runSafetyChecks(network, tokenAddress, poolAddress, blockNumber) {
+  const client = getExplorerClient(network);
+  const [verification, isProxy, topHolderRaw, lpLock] = await Promise.all([
+    withTimeout(checkContractVerification(network, tokenAddress), 20000, "checkContractVerification")
+      .catch(() => ({ verified: false, riskyFunctions: [], rateLimited: false })),
+    withTimeout(checkIsProxy(network, tokenAddress), 15000, "checkIsProxy").catch(() => false),
+    withTimeout(client.fetchTopHolderPct(network, tokenAddress, poolAddress), 20000, "fetchTopHolderPct")
+      .catch(() => ({ pct: null, holder: null, available: false, rateLimited: false })),
+    withTimeout(findLpLockStatus(network, poolAddress, blockNumber), 25000, "findLpLockStatus")
+      .catch(() => ({ status: "unknown", owner: null, lockerVerified: null, lockerRiskyFunctions: [], rateLimitedLocker: false })),
+  ]);
+
+  const rateLimitedAny =
+    verification.rateLimited === true ||
+    topHolderRaw.rateLimited === true ||
+    lpLock.rateLimitedLocker === true;
+
+  return { verification, isProxy, topHolderRaw, lpLock, rateLimitedAny };
 }
 
 async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolAddress, blockNumber) {
@@ -312,20 +344,12 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
   const symbol = sanitizeIdentity(rawSymbol, MAX_SYMBOL_LENGTH);
   const spoofedIdentity = looksSpoofed(name, symbol);
 
-  // These four checks are all independent of each other (and of the block
-  // data above), so run them concurrently instead of one after another --
-  // each is also individually timeout-guarded so one hung explorer/RPC call
-  // can't stall this token (or the whole batch it's part of) indefinitely.
-  const client = getExplorerClient(network);
-  const [verification, isProxy, topHolderRaw, lpLock] = await Promise.all([
-    withTimeout(checkContractVerification(network, newTokenAddress), 20000, "checkContractVerification")
-      .catch(() => ({ verified: false, riskyFunctions: [] })),
-    withTimeout(checkIsProxy(network, newTokenAddress), 15000, "checkIsProxy").catch(() => false),
-    withTimeout(client.fetchTopHolderPct(network, newTokenAddress, poolAddress), 20000, "fetchTopHolderPct")
-      .catch(() => ({ pct: null, holder: null, available: false })),
-    withTimeout(findLpLockStatus(network, poolAddress, blockNumber), 25000, "findLpLockStatus")
-      .catch(() => ({ status: "unknown", owner: null, lockerVerified: null, lockerRiskyFunctions: [] })),
-  ]);
+  const { verification, isProxy, topHolderRaw, lpLock, rateLimitedAny } = await runSafetyChecks(
+    network,
+    newTokenAddress,
+    poolAddress,
+    blockNumber
+  );
 
   const baseLiquidityFormatted = Number(ethers.formatUnits(baseBalanceInPool, 18));
   const newTokenReserveFormatted = Number(ethers.formatUnits(newTokenBalanceInPool, decimals));
@@ -350,7 +374,7 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
   }
 
   const isSafu =
-    verification.verified &&
+    verification.verified === true &&
     verification.riskyFunctions.length === 0 &&
     !isProxy &&
     topHolderRaw.pct !== null &&
@@ -380,7 +404,7 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
     baseLiquidity: baseLiquidityFormatted,
     priceUsd,
     marketCapUsd,
-    verified: verification.verified,
+    verified: verification.verified === true,
     riskyFunctions: verification.riskyFunctions,
     isProxy,
     topHolderAddress: topHolderRaw.holder,
@@ -391,6 +415,8 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
     lpLockerVerified: lpLock.lockerVerified,
     lpLockerRiskyFunctions: lpLock.lockerRiskyFunctions,
     isSafu,
+    needsRecheck: rateLimitedAny,
+    recheckAttempts: 0,
     blockNumber,
     launchedAt,
     scannedAt: Date.now(),
@@ -442,33 +468,62 @@ async function refreshKnownTokenPrices(network) {
 
           const marketCapUsd = priceUsd !== null ? priceUsd * totalSupplyFormatted : null;
 
-          // Same gating as analyzeNewToken: verified, clean, non-proxy,
-          // acceptable top-holder concentration and liquidity, a name/symbol
-          // that actually resolved and isn't spoofing a legitimacy claim,
-          // and an LP that's genuinely locked or burned -- not just "known
-          // address" or "unlocked"/"unknown". Older records saved before
-          // these fields existed are treated as passing (undefined !== false)
-          // so this doesn't retroactively break existing SAFU entries whose
-          // underlying data we haven't re-checked.
-          const newIsSafu =
-            record.verified &&
-            record.riskyFunctions.length === 0 &&
-            !record.isProxy &&
-            record.topHolderPct !== null &&
-            record.topHolderPct < config.safuMaxDeployerPct &&
-            baseLiquidityFormatted >= config.safuMinLiquidityEth &&
-            record.nameOk !== false &&
-            record.symbolOk !== false &&
-            !record.spoofedIdentity &&
-            isLpTrulyLocked(record.lpLockStatus);
+          let updatedRecord = { ...record, baseLiquidity: baseLiquidityFormatted, priceUsd, marketCapUsd };
 
-          const updatedRecord = {
-            ...record,
-            baseLiquidity: baseLiquidityFormatted,
-            priceUsd,
-            marketCapUsd,
-            isSafu: newIsSafu,
-          };
+          // If this token's original analysis got rate-limited, retry the
+          // FULL safety check (not just price) here -- this loop already
+          // runs every scan cycle, so a temporary rate-limit now gets a real
+          // second (third, fourth...) chance instead of being stuck wrong
+          // forever, up to a small attempt cap so a persistently-broken
+          // lookup doesn't retry indefinitely.
+          if (record.needsRecheck && (record.recheckAttempts || 0) < MAX_RECHECK_ATTEMPTS) {
+            const { verification, isProxy, topHolderRaw, lpLock, rateLimitedAny } = await runSafetyChecks(
+              network,
+              record.tokenAddress,
+              record.poolAddress,
+              record.blockNumber
+            );
+
+            updatedRecord = {
+              ...updatedRecord,
+              verified: verification.verified === true,
+              riskyFunctions: verification.riskyFunctions,
+              isProxy,
+              topHolderAddress: topHolderRaw.holder,
+              topHolderPct: topHolderRaw.pct,
+              topHolderDataAvailable: topHolderRaw.available !== false,
+              lpLockStatus: lpLock.status,
+              lpOwner: lpLock.owner,
+              lpLockerVerified: lpLock.lockerVerified,
+              lpLockerRiskyFunctions: lpLock.lockerRiskyFunctions,
+              needsRecheck: rateLimitedAny,
+              recheckAttempts: (record.recheckAttempts || 0) + 1,
+            };
+
+            if (!rateLimitedAny) {
+              console.log(
+                `[${network.label}] Recheck resolved for ${record.symbol} (${record.tokenAddress}) after ${updatedRecord.recheckAttempts} attempt(s)`
+              );
+            } else if (updatedRecord.recheckAttempts >= MAX_RECHECK_ATTEMPTS) {
+              console.warn(
+                `[${network.label}] Giving up recheck for ${record.symbol} (${record.tokenAddress}) after ${MAX_RECHECK_ATTEMPTS} attempts -- explorer still rate-limiting`
+              );
+            }
+          }
+
+          const newIsSafu =
+            updatedRecord.verified === true &&
+            updatedRecord.riskyFunctions.length === 0 &&
+            !updatedRecord.isProxy &&
+            updatedRecord.topHolderPct !== null &&
+            updatedRecord.topHolderPct < config.safuMaxDeployerPct &&
+            baseLiquidityFormatted >= config.safuMinLiquidityEth &&
+            updatedRecord.nameOk !== false &&
+            updatedRecord.symbolOk !== false &&
+            !updatedRecord.spoofedIdentity &&
+            isLpTrulyLocked(updatedRecord.lpLockStatus);
+
+          updatedRecord.isSafu = newIsSafu;
 
           if (newIsSafu && !record.isSafu && !record.alertedAt) {
             updatedRecord.alertedAt = Date.now();
@@ -532,9 +587,6 @@ async function scanNetwork(network) {
     });
   }
 
-  // Fast pre-check: grab just the base-token liquidity for every candidate
-  // (one cheap call each, done at high concurrency) so we can process the
-  // most promising -- most likely to already be SAFU -- tokens first.
   const { provider: precheckProvider } = getContext(network);
   const PRECHECK_CONCURRENCY = 25;
   for (let i = 0; i < candidates.length; i += PRECHECK_CONCURRENCY) {
@@ -553,10 +605,6 @@ async function scanNetwork(network) {
   }
   candidates.sort((a, b) => b.quickLiquidity - a.quickLiquidity);
 
-  // Analyze tokens in small parallel batches instead of one at a time --
-  // a single sequential pass over hundreds of pools could take hours.
-  // Each token also gets its own outer timeout as a second line of defense,
-  // on top of the timeouts already inside analyzeNewToken itself.
   const BATCH_SIZE = 12;
   for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
     const batch = candidates.slice(i, i + BATCH_SIZE);
