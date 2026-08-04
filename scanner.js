@@ -373,12 +373,24 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
     }
   }
 
+ // If this chain's explorer genuinely can't give us top-holder data (a
+  // real limitation, e.g. Etherscan's holder-list being paid-plan-only on
+  // some chains, or Blockscout not returning a usable response), don't let
+  // an unmeasurable signal block SAFU forever -- skip this one criterion,
+  // but the token stays clearly flagged everywhere as "top holder
+  // unconfirmed" via topHolderDataAvailable, so nothing is silently assumed
+  // safe. If data WAS available and pct is still null, that's a genuine
+  // failure worth blocking on, not a known limitation.
+  const topHolderOk =
+    topHolderRaw.available === false
+      ? true
+      : topHolderRaw.pct !== null && topHolderRaw.pct < config.safuMaxDeployerPct;
+
   const isSafu =
     verification.verified === true &&
     verification.riskyFunctions.length === 0 &&
     !isProxy &&
-    topHolderRaw.pct !== null &&
-    topHolderRaw.pct < config.safuMaxDeployerPct &&
+    topHolderOk &&
     baseLiquidityFormatted >= config.safuMinLiquidityEth &&
     nameOk &&
     symbolOk &&
@@ -511,12 +523,16 @@ async function refreshKnownTokenPrices(network) {
             }
           }
 
+const topHolderOk =
+            updatedRecord.topHolderDataAvailable === false
+              ? true
+              : updatedRecord.topHolderPct !== null && updatedRecord.topHolderPct < config.safuMaxDeployerPct;
+
           const newIsSafu =
             updatedRecord.verified === true &&
             updatedRecord.riskyFunctions.length === 0 &&
             !updatedRecord.isProxy &&
-            updatedRecord.topHolderPct !== null &&
-            updatedRecord.topHolderPct < config.safuMaxDeployerPct &&
+            topHolderOk &&
             baseLiquidityFormatted >= config.safuMinLiquidityEth &&
             updatedRecord.nameOk !== false &&
             updatedRecord.symbolOk !== false &&
