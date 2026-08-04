@@ -5,6 +5,7 @@ const db = require("./db");
 const blockscout = require("./explorers/blockscout");
 const etherscan = require("./explorers/etherscan");
 const telegram = require("./telegram");
+const { withTimeout, fetchJsonWithTimeout } = require("./utils/withTimeout");
 
 // Simple in-memory cache for ETH/USD so we don't hit the price API on every token.
 let ethPriceCache = { value: null, fetchedAt: 0 };
@@ -15,18 +16,13 @@ async function getEthUsdPrice() {
   if (ethPriceCache.value && now - ethPriceCache.fetchedAt < ETH_PRICE_TTL_MS) {
     return ethPriceCache.value;
   }
-  try {
-    const res = await fetch(
-      "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd"
-    );
-    const data = await res.json();
-    const price = data?.ethereum?.usd;
-    if (price) {
-      ethPriceCache = { value: price, fetchedAt: now };
-      return price;
-    }
-  } catch (err) {
-    console.error("ETH price fetch failed:", err.message);
+  const data = await fetchJsonWithTimeout(
+    "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd"
+  );
+  const price = data?.ethereum?.usd;
+  if (price) {
+    ethPriceCache = { value: price, fetchedAt: now };
+    return price;
   }
   return ethPriceCache.value;
 }
@@ -59,9 +55,8 @@ const RISKY_FUNCTION_KEYWORDS = [
 // Function name fragments that, if present in a *locker* contract's verified
 // source, suggest the deployer (or some privileged role) can pull the LP
 // tokens out before the stated unlock time -- i.e. the "lock" isn't really
-// enforced by the contract, just by convention. This is a heuristic on
-// function names, same limitation as RISKY_FUNCTION_KEYWORDS above: it can't
-// tell whether a function is actually reachable/gated, only that it exists.
+// enforced by the contract, just by convention. Same limitation as
+// RISKY_FUNCTION_KEYWORDS above: it's a name match, not proof of reachability.
 const LOCKER_RISK_KEYWORDS = [
   "emergencywithdraw",
   "emergencyexit",
@@ -91,7 +86,11 @@ async function getLogsChunked(contract, eventFilter, fromBlock, toBlock, chunkSi
   while (start <= toBlock) {
     const end = Math.min(start + chunkSize - 1, toBlock);
     try {
-      const logs = await contract.queryFilter(eventFilter, start, end);
+      const logs = await withTimeout(
+        contract.queryFilter(eventFilter, start, end),
+        20000,
+        `queryFilter blocks ${start}-${end}`
+      );
       allLogs.push(...logs);
     } catch (err) {
       console.error(`Log fetch failed for blocks ${start}-${end}:`, err.message);
@@ -141,7 +140,11 @@ async function checkContractVerification(network, address) {
 async function checkIsProxy(network, address) {
   try {
     const { provider } = getContext(network);
-    const slotValue = await provider.getStorage(address, EIP1967_IMPLEMENTATION_SLOT);
+    const slotValue = await withTimeout(
+      provider.getStorage(address, EIP1967_IMPLEMENTATION_SLOT),
+      15000,
+      "getStorage"
+    );
     return slotValue !== ethers.ZeroHash;
   } catch (err) {
     return false;
@@ -192,14 +195,14 @@ async function findLpLockStatus(network, poolAddress, fromBlock) {
       const tokenId = log.args.tokenId;
       let pos;
       try {
-        pos = await positionManager.positions(tokenId);
+        pos = await withTimeout(positionManager.positions(tokenId), 15000, "positions");
       } catch {
         continue;
       }
       const poolContract = new ethers.Contract(poolAddress, POOL_ABI, provider);
       const [poolToken0, poolToken1] = await Promise.all([
-        poolContract.token0(),
-        poolContract.token1(),
+        withTimeout(poolContract.token0(), 15000, "pool.token0"),
+        withTimeout(poolContract.token1(), 15000, "pool.token1"),
       ]);
       if (
         pos.token0.toLowerCase() !== poolToken0.toLowerCase() ||
@@ -208,7 +211,10 @@ async function findLpLockStatus(network, poolAddress, fromBlock) {
         continue;
       }
 
-      const currentOwner = (await positionManager.ownerOf(tokenId)).toLowerCase();
+      const currentOwner = (
+        await withTimeout(positionManager.ownerOf(tokenId), 15000, "ownerOf")
+      ).toLowerCase();
+
       if (config.burnAddresses.has(currentOwner)) {
         return { status: "burned", owner: currentOwner, lockerVerified: null, lockerRiskyFunctions: [] };
       }
@@ -244,29 +250,33 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
   const token = new ethers.Contract(newTokenAddress, ERC20_ABI, provider);
   const baseToken = new ethers.Contract(baseTokenAddress, ERC20_ABI, provider);
 
-  const block = await provider.getBlock(blockNumber).catch(() => null);
+  const block = await withTimeout(provider.getBlock(blockNumber), 15000, "getBlock").catch(() => null);
   const launchedAt = block ? block.timestamp * 1000 : Date.now();
 
   const [name, symbol, decimals, totalSupply, baseBalanceInPool, baseSymbol, newTokenBalanceInPool] =
     await Promise.all([
-      token.name().catch(() => "Unknown"),
-      token.symbol().catch(() => "???"),
-      token.decimals().catch(() => 18),
-      token.totalSupply().catch(() => 0n),
-      baseToken.balanceOf(poolAddress).catch(() => 0n),
-      baseToken.symbol().catch(() => network.baseAssetSymbolFallback),
-      token.balanceOf(poolAddress).catch(() => 0n),
+      withTimeout(token.name(), 15000, "token.name").catch(() => "Unknown"),
+      withTimeout(token.symbol(), 15000, "token.symbol").catch(() => "???"),
+      withTimeout(token.decimals(), 15000, "token.decimals").catch(() => 18),
+      withTimeout(token.totalSupply(), 15000, "token.totalSupply").catch(() => 0n),
+      withTimeout(baseToken.balanceOf(poolAddress), 15000, "baseToken.balanceOf").catch(() => 0n),
+      withTimeout(baseToken.symbol(), 15000, "baseToken.symbol").catch(() => network.baseAssetSymbolFallback),
+      withTimeout(token.balanceOf(poolAddress), 15000, "token.balanceOf").catch(() => 0n),
     ]);
 
   // These four checks are all independent of each other (and of the block
   // data above), so run them concurrently instead of one after another --
-  // this is the main thing slowing down how fast a fresh SAFU alert fires.
+  // each is also individually timeout-guarded so one hung explorer/RPC call
+  // can't stall this token (or the whole batch it's part of) indefinitely.
   const client = getExplorerClient(network);
   const [verification, isProxy, topHolderRaw, lpLock] = await Promise.all([
-    checkContractVerification(network, newTokenAddress),
-    checkIsProxy(network, newTokenAddress),
-    client.fetchTopHolderPct(network, newTokenAddress, poolAddress),
-    findLpLockStatus(network, poolAddress, blockNumber),
+    withTimeout(checkContractVerification(network, newTokenAddress), 20000, "checkContractVerification")
+      .catch(() => ({ verified: false, riskyFunctions: [] })),
+    withTimeout(checkIsProxy(network, newTokenAddress), 15000, "checkIsProxy").catch(() => false),
+    withTimeout(client.fetchTopHolderPct(network, newTokenAddress, poolAddress), 20000, "fetchTopHolderPct")
+      .catch(() => ({ pct: null, holder: null, available: false })),
+    withTimeout(findLpLockStatus(network, poolAddress, blockNumber), 25000, "findLpLockStatus")
+      .catch(() => ({ status: "unknown", owner: null, lockerVerified: null, lockerRiskyFunctions: [] })),
   ]);
 
   const baseLiquidityFormatted = Number(ethers.formatUnits(baseBalanceInPool, 18));
@@ -349,8 +359,8 @@ async function refreshKnownTokenPrices(network) {
           const baseToken = new ethers.Contract(record.baseTokenAddress, ERC20_ABI, provider);
 
           const [newTokenBalanceInPool, baseBalanceInPool] = await Promise.all([
-            token.balanceOf(record.poolAddress).catch(() => null),
-            baseToken.balanceOf(record.poolAddress).catch(() => null),
+            withTimeout(token.balanceOf(record.poolAddress), 15000, "refresh balanceOf").catch(() => null),
+            withTimeout(baseToken.balanceOf(record.poolAddress), 15000, "refresh baseToken balanceOf").catch(() => null),
           ]);
 
           if (newTokenBalanceInPool === null || baseBalanceInPool === null) return;
@@ -409,7 +419,7 @@ async function refreshKnownTokenPrices(network) {
 
 async function scanNetwork(network) {
   const { provider, factory } = getContext(network);
-  const currentBlock = await provider.getBlockNumber();
+  const currentBlock = await withTimeout(provider.getBlockNumber(), 15000, "getBlockNumber");
 
   console.log(`[${network.label}] Refreshing prices for already-known tokens...`);
   await refreshKnownTokenPrices(network);
@@ -468,7 +478,7 @@ async function scanNetwork(network) {
       slice.map(async (c) => {
         try {
           const baseToken = new ethers.Contract(c.baseToken, ERC20_ABI, precheckProvider);
-          const bal = await baseToken.balanceOf(c.pool);
+          const bal = await withTimeout(baseToken.balanceOf(c.pool), 15000, "precheck balanceOf");
           c.quickLiquidity = Number(ethers.formatUnits(bal, 18));
         } catch {
           c.quickLiquidity = 0;
@@ -480,11 +490,19 @@ async function scanNetwork(network) {
 
   // Analyze tokens in small parallel batches instead of one at a time --
   // a single sequential pass over hundreds of pools could take hours.
+  // Each token also gets its own outer timeout as a second line of defense,
+  // on top of the timeouts already inside analyzeNewToken itself.
   const BATCH_SIZE = 12;
   for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
     const batch = candidates.slice(i, i + BATCH_SIZE);
     const results = await Promise.allSettled(
-      batch.map((c) => analyzeNewToken(network, c.newToken, c.baseToken, c.pool, c.blockNumber))
+      batch.map((c) =>
+        withTimeout(
+          analyzeNewToken(network, c.newToken, c.baseToken, c.pool, c.blockNumber),
+          60000,
+          `analyzeNewToken ${c.newToken}`
+        )
+      )
     );
 
     results.forEach((result, idx) => {
