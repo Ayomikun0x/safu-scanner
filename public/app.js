@@ -136,6 +136,11 @@ function sniperBadge(t) {
   return `<span class="badge ${cls}">Early buyers: ${pct.toFixed(0)}%</span>`;
 }
 
+function pumpWatchBadge(t) {
+  if (!t.isPumpWatch) return "";
+  return `<span class="badge badge-amber">⚠ Deployer pumps then rugs (${t.deployerHit2xCount || 0}x hit 2x+)</span>`;
+}
+
 function renderCard(t, isNew) {
   return `
     <div class="token-card ${t.isSafu ? "is-safu" : ""}">
@@ -165,6 +170,7 @@ function renderCard(t, isNew) {
         ${deployerBadge(t)}
         ${sniperBadge(t)}
         ${spoofBadge(t)}
+        ${pumpWatchBadge(t)}
       </div>
       ${t.lpOwner ? `
       <div class="lp-owner-row">
@@ -199,7 +205,7 @@ function attachCopyHandlers(container) {
   });
 }
 
-function renderChainSection(chainKey, chainLabel, allTokens, safuTokens, isNewFn) {
+function renderChainSection(chainKey, chainLabel, allTokens, safuTokens, pumpWatchTokens, isNewFn) {
   return `
     <section class="chain-section">
       <h2 class="chain-title">${chainLabel}</h2>
@@ -226,6 +232,18 @@ function renderChainSection(chainKey, chainLabel, allTokens, safuTokens, isNewFn
               : `<p class="column-empty">None have passed the filter yet.</p>`}
           </div>
         </section>
+      </div>
+      <div class="pump-watch-section">
+        <div class="column-head">
+          <h3>⚠️ Pump Watch <span class="column-sub">deployers with a rug history who ALSO hit 2x+ before -- not a safety signal</span></h3>
+          <span class="count-pill">${pumpWatchTokens.length}</span>
+        </div>
+        <p class="disclaimer">This is a historical pattern only -- it means this wallet's past tokens pumped before rugging, not that this specific token is safe. Treat as high-risk speculation, not a recommendation.</p>
+        <div class="card-list">
+          ${pumpWatchTokens.length
+            ? pumpWatchTokens.map((t) => renderCard(t, isNewFn(t))).join("")
+            : `<p class="column-empty">No repeat pump-then-rug patterns detected yet.</p>`}
+        </div>
       </div>
     </section>
   `;
@@ -275,12 +293,13 @@ async function loadTokens({ scanFirst } = {}) {
   for (const key of chainKeys) {
     const { label, tokens: chainTokens } = byChain.get(key);
     const safuTokens = chainTokens.filter((t) => t.isSafu).sort(sortFn);
+    const pumpWatchTokens = chainTokens.filter((t) => t.isPumpWatch).sort(sortFn);
     let allTokens = hideSpam
       ? chainTokens.filter((t) => t.baseLiquidity >= DUST_THRESHOLD_ETH)
       : chainTokens;
     allTokens = [...allTokens].sort(sortFn);
 
-    html += renderChainSection(key, label, allTokens, safuTokens, isNew);
+    html += renderChainSection(key, label, allTokens, safuTokens, pumpWatchTokens, isNew);
   }
 
   const container = document.getElementById("chainSections");
