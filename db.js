@@ -46,21 +46,22 @@ function setLastScannedBlock(networkKey, blockNumber) {
 }
 
 // --- Deployer reputation ---
-// Tracks, per deployer wallet address, every token they've launched through
-// this scanner and which of those we later confirmed as rugged (liquidity
-// collapsed or a locked/burned LP got pulled). This only knows what THIS
-// scanner has observed since it started running -- it has no memory of a
-// wallet's history from before, and it only becomes useful after some time
-// running.
+// Tracks, per deployer wallet, every token launched through this scanner,
+// which ones were later confirmed rugged, and which ones hit a "pump"
+// multiple (price rose to >= PUMP_WATCH_MULTIPLE x its launch price) before
+// anything happened to it either way. Combining rugged + hit2x lets us spot
+// a specific repeat pattern: a deployer whose tokens reliably pump before
+// they rug -- worth watching, but never treated as a safety signal.
 
 function getDeployerRecord(deployerAddress) {
-  if (!deployerAddress) return { totalLaunches: 0, ruggedCount: 0 };
+  if (!deployerAddress) return { totalLaunches: 0, ruggedCount: 0, hit2xCount: 0 };
   const data = load();
   const rec = data.deployers[deployerAddress.toLowerCase()];
-  if (!rec) return { totalLaunches: 0, ruggedCount: 0 };
+  if (!rec) return { totalLaunches: 0, ruggedCount: 0, hit2xCount: 0 };
   return {
     totalLaunches: (rec.launches || []).length,
     ruggedCount: (rec.ruggedTokens || []).length,
+    hit2xCount: (rec.hit2xTokens || []).length,
   };
 }
 
@@ -68,7 +69,7 @@ function recordDeployerLaunch(deployerAddress, tokenKey) {
   if (!deployerAddress) return;
   const data = load();
   const key = deployerAddress.toLowerCase();
-  if (!data.deployers[key]) data.deployers[key] = { launches: [], ruggedTokens: [] };
+  if (!data.deployers[key]) data.deployers[key] = { launches: [], ruggedTokens: [], hit2xTokens: [] };
   if (!data.deployers[key].launches.includes(tokenKey)) {
     data.deployers[key].launches.push(tokenKey);
   }
@@ -79,9 +80,20 @@ function markDeployerRugged(deployerAddress, tokenKey) {
   if (!deployerAddress) return;
   const data = load();
   const key = deployerAddress.toLowerCase();
-  if (!data.deployers[key]) data.deployers[key] = { launches: [], ruggedTokens: [] };
+  if (!data.deployers[key]) data.deployers[key] = { launches: [], ruggedTokens: [], hit2xTokens: [] };
   if (!data.deployers[key].ruggedTokens.includes(tokenKey)) {
     data.deployers[key].ruggedTokens.push(tokenKey);
+  }
+  save(data);
+}
+
+function recordDeployerHit2x(deployerAddress, tokenKey) {
+  if (!deployerAddress) return;
+  const data = load();
+  const key = deployerAddress.toLowerCase();
+  if (!data.deployers[key]) data.deployers[key] = { launches: [], ruggedTokens: [], hit2xTokens: [] };
+  if (!data.deployers[key].hit2xTokens.includes(tokenKey)) {
+    data.deployers[key].hit2xTokens.push(tokenKey);
   }
   save(data);
 }
@@ -94,4 +106,5 @@ module.exports = {
   getDeployerRecord,
   recordDeployerLaunch,
   markDeployerRugged,
+  recordDeployerHit2x,
 };
