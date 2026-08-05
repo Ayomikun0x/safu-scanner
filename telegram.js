@@ -35,11 +35,6 @@ async function sendTelegramMessage(text) {
   }
 }
 
-// Design A: score-first summary, then a checklist. Only ever called on
-// tokens that already passed isSafu, so every REQUIRED check is a pass by
-// definition -- the ✅/➖ distinction here is about honesty, not risk: ➖
-// marks a check that was skipped because the data genuinely wasn't
-// available on this chain (and so didn't block SAFU), not a hidden failure.
 function buildChecklist(record) {
   const lines = [];
   let confirmed = 0;
@@ -101,4 +96,25 @@ async function sendSafuAlert(record) {
   await sendTelegramMessage(text);
 }
 
-module.exports = { sendTelegramMessage, sendSafuAlert };
+// Deliberately NOT styled like a SAFU pass -- this is the opposite kind of
+// signal: a deployer with a proven pump-then-rug track record. Kept visually
+// and structurally distinct (different emoji, explicit "NOT SAFU" label, no
+// checklist) so it can never be mistaken for a safety confirmation.
+async function sendPumpWatchAlert(record) {
+  const explorerLink = `${record.explorerAddressBase}${record.tokenAddress}`;
+  const poolLink = `${record.uniswapPoolUrlBase}${record.poolAddress}`;
+
+  const text =
+    `⚠️ <b>PUMP WATCH — NOT SAFU (speculative pattern)</b>\n` +
+    `${escapeHtml(record.name)} (${escapeHtml(record.symbol)}) · ${escapeHtml(record.chainLabel)}\n\n` +
+    `This deployer has rugged ${record.deployerRuggedCount || 0} of ${record.deployerLaunches || 0} prior launches, ` +
+    `but ${record.deployerHit2xCount || 0} hit 2x+ price before anything happened to them.\n\n` +
+    `💰 ${formatCompactUsd(record.marketCapUsd)} MC  ·  ${formatCompactUsd(record.priceUsd)}  ·  ${record.baseLiquidity.toFixed(3)} ${record.baseSymbol} liquidity\n\n` +
+    `<code>${record.tokenAddress}</code>\n\n` +
+    `<a href="${explorerLink}">Explorer</a> · <a href="${poolLink}">Pool</a>\n\n` +
+    `🚨 This is a historical deployer pattern, not a safety check. High risk of loss. DYOR.`;
+
+  await sendTelegramMessage(text);
+}
+
+module.exports = { sendTelegramMessage, sendSafuAlert, sendPumpWatchAlert };
