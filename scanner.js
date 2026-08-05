@@ -55,6 +55,7 @@ const MAX_NAME_LENGTH = 40;
 const MAX_SYMBOL_LENGTH = 15;
 const MAX_RECHECK_ATTEMPTS = 5;
 const LIQUIDITY_COLLAPSE_RATIO = 0.2;
+const PUMP_WATCH_MULTIPLE = 2; // price hitting 2x its launch price triggers "pumped" tracking
 
 function sanitizeIdentity(raw, maxLength) {
   const str = String(raw || "").trim();
@@ -362,7 +363,7 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
     await runSafetyChecks(network, newTokenAddress, poolAddress, blockNumber, totalSupplyFormatted, decimals, totalSupply.toString());
 
   const deployerAddress = resolvedDeployer;
-  const deployerRecord = deployerAddress ? db.getDeployerRecord(deployerAddress) : { totalLaunches: 0, ruggedCount: 0 };
+  const deployerRecord = deployerAddress ? db.getDeployerRecord(deployerAddress) : { totalLaunches: 0, ruggedCount: 0, hit2xCount: 0 };
 
   const baseLiquidityFormatted = Number(ethers.formatUnits(baseBalanceInPool, 18));
   const newTokenReserveFormatted = Number(ethers.formatUnits(newTokenBalanceInPool, decimals));
@@ -399,6 +400,12 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
     deployerOk &&
     snipingOk;
 
+  // Pump Watch: this deployer has a proven track record of rugging AND
+  // pumping tokens to 2x+ first. This is a historical pattern flag, entirely
+  // separate from isSafu -- it says nothing about THIS token's own safety,
+  // only about what this wallet has done before.
+  const isPumpWatch = deployerRecord.ruggedCount > 0 && deployerRecord.hit2xCount > 0;
+
   return {
     chain: network.key,
     chainLabel: network.label,
@@ -413,6 +420,9 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
     baseSymbol,
     baseLiquidity: baseLiquidityFormatted,
     priceUsd, marketCapUsd,
+    launchPriceUsd: priceUsd,
+    peakPriceUsd: priceUsd,
+    hit2xFlagged: false,
     verified: verification.verified === true,
     riskyFunctions: verification.riskyFunctions,
     isProxy,
@@ -427,9 +437,12 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
     deployerAddress,
     deployerLaunches: deployerRecord.totalLaunches,
     deployerRuggedCount: deployerRecord.ruggedCount,
+    deployerHit2xCount: deployerRecord.hit2xCount,
     earlySniperPct: earlySnipers.pct,
     earlySniperWallets: earlySnipers.wallets,
     isSafu,
+    isPumpWatch,
+    pumpWatchAlertedAt: null,
     needsRecheck: rateLimitedAny,
     recheckAttempts: 0,
     peakLiquidity: baseLiquidityFormatted,
@@ -505,6 +518,26 @@ async function refreshKnownTokenPrices(network) {
             };
           }
 
+          // Track peak price and flag a "hit 2x" event on this deployer the
+          // first time this token's price reaches PUMP_WATCH_MULTIPLE x its
+          // launch price. Only fires once per token (hit2xFlagged guards it).
+          const launchPriceUsd = record.launchPriceUsd ?? null;
+          const peakPriceUsd = Math.max(record.peakPriceUsd || 0, priceUsd || 0);
+          updatedRecord.peakPriceUsd = peakPriceUsd;
+          updatedRecord.hit2xFlagged = record.hit2xFlagged || false;
+
+          if (
+            !updatedRecord.hit2xFlagged &&
+            launchPriceUsd &&
+            peakPriceUsd >= launchPriceUsd * PUMP_WATCH_MULTIPLE &&
+            record.deployerAddress
+          ) {
+            const tokenKey = `${record.chain}:${record.tokenAddress}`;
+            db.recordDeployerHit2x(record.deployerAddress, tokenKey);
+            updatedRecord.hit2xFlagged = true;
+            console.log(`[${network.label}] ${record.symbol} (${record.tokenAddress}) hit ${PUMP_WATCH_MULTIPLE}x -- deployer ${record.deployerAddress} pattern updated.`);
+          }
+
           const peakLiquidity = Math.max(record.peakLiquidity || 0, baseLiquidityFormatted);
           const wasEverLocked = record.wasEverLocked || isLpTrulyLocked(record.lpLockStatus);
           updatedRecord.peakLiquidity = peakLiquidity;
@@ -526,9 +559,10 @@ async function refreshKnownTokenPrices(network) {
 
           const deployerRecord = updatedRecord.deployerAddress
             ? db.getDeployerRecord(updatedRecord.deployerAddress)
-            : { totalLaunches: 0, ruggedCount: 0 };
+            : { totalLaunches: 0, ruggedCount: 0, hit2xCount: 0 };
           updatedRecord.deployerLaunches = deployerRecord.totalLaunches;
           updatedRecord.deployerRuggedCount = deployerRecord.ruggedCount;
+          updatedRecord.deployerHit2xCount = deployerRecord.hit2xCount;
 
           const topHolderOk =
             updatedRecord.topHolderDataAvailable === false
@@ -558,6 +592,14 @@ async function refreshKnownTokenPrices(network) {
           if (newIsSafu && !record.isSafu && !record.alertedAt) {
             updatedRecord.alertedAt = Date.now();
             telegram.sendSafuAlert(updatedRecord);
+          }
+
+          const newIsPumpWatch = deployerRecord.ruggedCount > 0 && deployerRecord.hit2xCount > 0;
+          updatedRecord.isPumpWatch = newIsPumpWatch;
+
+          if (newIsPumpWatch && !record.isPumpWatch && !record.pumpWatchAlertedAt) {
+            updatedRecord.pumpWatchAlertedAt = Date.now();
+            telegram.sendPumpWatchAlert(updatedRecord);
           }
 
           db.upsertToken(updatedRecord);
@@ -619,28 +661,40 @@ async function scanNetwork(network) {
   const BATCH_SIZE = 6;
   for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
     const batch = candidates.slice(i, i + BATCH_SIZE);
-    const results = await Promise.allSettled(
-      batch.map((c) =>
-        withTimeout(analyzeNewToken(network, c.newToken, c.baseToken, c.pool, c.blockNumber), 60000, `analyzeNewToken ${c.newToken}`)
+
+    // Each token handles its own db write and alert(s) the moment ITS OWN
+    // analysis resolves -- not after waiting for the rest of the batch. That
+    // wait was silent, unnecessary Telegram delay: a fast token used to sit
+    // blocked behind whichever batch-mate happened to be slowest.
+    const batchPromises = batch.map((c) =>
+      withTimeout(
+        analyzeNewToken(network, c.newToken, c.baseToken, c.pool, c.blockNumber),
+        60000,
+        `analyzeNewToken ${c.newToken}`
       )
+        .then((record) => {
+          const tokenKey = `${record.chain}:${record.tokenAddress}`;
+          if (record.deployerAddress) db.recordDeployerLaunch(record.deployerAddress, tokenKey);
+
+          if (record.isSafu) {
+            record.alertedAt = Date.now();
+            telegram.sendSafuAlert(record);
+          }
+          if (record.isPumpWatch) {
+            record.pumpWatchAlertedAt = Date.now();
+            telegram.sendPumpWatchAlert(record);
+          }
+
+          db.upsertToken(record);
+          newTokenCount += 1;
+          console.log(`[${network.label}] Recorded: ${record.symbol} (${record.tokenAddress})`);
+        })
+        .catch((err) => {
+          console.error(`[${network.label}] Failed to analyze token ${c.newToken}:`, err.message);
+        })
     );
 
-    results.forEach((result, idx) => {
-      if (result.status === "fulfilled") {
-        const record = result.value;
-        const tokenKey = `${record.chain}:${record.tokenAddress}`;
-        if (record.deployerAddress) db.recordDeployerLaunch(record.deployerAddress, tokenKey);
-        if (record.isSafu) {
-          record.alertedAt = Date.now();
-          telegram.sendSafuAlert(record);
-        }
-        db.upsertToken(record);
-        newTokenCount += 1;
-        console.log(`[${network.label}] Recorded: ${record.symbol} (${record.tokenAddress})`);
-      } else {
-        console.error(`[${network.label}] Failed to analyze token ${batch[idx].newToken}:`, result.reason?.message);
-      }
-    });
+    await Promise.allSettled(batchPromises);
   }
 
   db.setLastScannedBlock(network.key, currentBlock);
