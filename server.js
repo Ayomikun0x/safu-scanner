@@ -61,7 +61,7 @@ async function runScanLoop() {
     // scanOnce should now already time out on its own well before this, but
     // this guarantees the loop can never be frozen indefinitely no matter
     // what slips through.
-    const result = await withTimeout(scanOnce(), 4 * 60 * 1000, "scanOnce");
+    const result = await withTimeout(scanOnce(), 6 * 60 * 1000, "scanOnce");
     const durationSec = ((Date.now() - startedAt) / 1000).toFixed(1);
     console.log(`Scan complete in ${durationSec}s: ${result.scanned} pools checked, ${result.newTokens} new tokens recorded`);
 } catch (err) {
