@@ -73,12 +73,6 @@ const EIP1967_IMPLEMENTATION_SLOT =
 const OWNERSHIP_ABI = ["function owner() view returns (address)"];
 const TRANSFER_EVENT_ABI = ["event Transfer(address indexed from, address indexed to, uint256 value)"];
 
-// Some tokens (notably Pons launchpad tokens on Robinhood Chain) expose their
-// own deployer directly on-chain via an immutable `deployer()` getter -- this
-// is more reliable than asking the explorer who created the contract, since
-// it's set once at construction and doesn't depend on the explorer's API
-// shape or a factory-vs-direct-deploy distinction. Not every token implements
-// this, so it's tried first and falls back to the explorer's creator lookup.
 const DEPLOYER_GETTER_ABI = ["function deployer() view returns (address)"];
 
 async function getOnChainDeployer(network, tokenAddress) {
@@ -88,7 +82,7 @@ async function getOnChainDeployer(network, tokenAddress) {
     const deployer = await withTimeout(contract.deployer(), 10000, "token.deployer()");
     return deployer.toLowerCase();
   } catch (err) {
-    return null; // token doesn't implement this pattern -- not an error, just not Pons-style
+    return null;
   }
 }
 
@@ -306,13 +300,13 @@ function isLpTrulyLocked(lpLockStatus) {
   return lpLockStatus === "locked" || lpLockStatus === "burned";
 }
 
-async function runSafetyChecks(network, tokenAddress, poolAddress, blockNumber, totalSupplyFormatted, decimals) {
+async function runSafetyChecks(network, tokenAddress, poolAddress, blockNumber, totalSupplyFormatted, decimals, totalSupplyRaw) {
   const client = getExplorerClient(network);
   const [verification, isProxy, topHolderRaw, lpLock, ownershipRenounced, creatorResult, earlySnipers, onChainDeployer] = await Promise.all([
     withTimeout(checkContractVerification(network, tokenAddress), 20000, "checkContractVerification")
       .catch(() => ({ verified: false, riskyFunctions: [], rateLimited: false })),
     withTimeout(checkIsProxy(network, tokenAddress), 15000, "checkIsProxy").catch(() => false),
-    withTimeout(client.fetchTopHolderPct(network, tokenAddress, poolAddress), 20000, "fetchTopHolderPct")
+    withTimeout(client.fetchTopHolderPct(network, tokenAddress, poolAddress, totalSupplyRaw), 20000, "fetchTopHolderPct")
       .catch(() => ({ pct: null, holder: null, available: false, rateLimited: false })),
     withTimeout(findLpLockStatus(network, poolAddress, blockNumber), 25000, "findLpLockStatus")
       .catch(() => ({ status: "unknown", owner: null, lockerVerified: null, lockerRiskyFunctions: [], rateLimitedLocker: false })),
@@ -365,7 +359,7 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
   const totalSupplyFormatted = Number(ethers.formatUnits(totalSupply, decimals));
 
   const { verification, isProxy, topHolderRaw, lpLock, ownershipRenounced, earlySnipers, rateLimitedAny, resolvedDeployer } =
-    await runSafetyChecks(network, newTokenAddress, poolAddress, blockNumber, totalSupplyFormatted, decimals);
+    await runSafetyChecks(network, newTokenAddress, poolAddress, blockNumber, totalSupplyFormatted, decimals, totalSupply.toString());
 
   const deployerAddress = resolvedDeployer;
   const deployerRecord = deployerAddress ? db.getDeployerRecord(deployerAddress) : { totalLaunches: 0, ruggedCount: 0 };
@@ -488,7 +482,7 @@ async function refreshKnownTokenPrices(network) {
 
           if (record.needsRecheck && (record.recheckAttempts || 0) < MAX_RECHECK_ATTEMPTS) {
             const { verification, isProxy, topHolderRaw, lpLock, ownershipRenounced, earlySnipers, rateLimitedAny, resolvedDeployer } =
-              await runSafetyChecks(network, record.tokenAddress, record.poolAddress, record.blockNumber, totalSupplyFormatted, record.decimals);
+              await runSafetyChecks(network, record.tokenAddress, record.poolAddress, record.blockNumber, totalSupplyFormatted, record.decimals, record.totalSupply);
 
             updatedRecord = {
               ...updatedRecord,
@@ -607,7 +601,7 @@ async function scanNetwork(network) {
   }
 
   const { provider: precheckProvider } = getContext(network);
-  const PRECHECK_CONCURRENCY = 25;
+  const PRECHECK_CONCURRENCY = 10;
   for (let i = 0; i < candidates.length; i += PRECHECK_CONCURRENCY) {
     const slice = candidates.slice(i, i + PRECHECK_CONCURRENCY);
     await Promise.all(
@@ -622,7 +616,7 @@ async function scanNetwork(network) {
   }
   candidates.sort((a, b) => b.quickLiquidity - a.quickLiquidity);
 
-  const BATCH_SIZE = 12;
+  const BATCH_SIZE = 6;
   for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
     const batch = candidates.slice(i, i + BATCH_SIZE);
     const results = await Promise.allSettled(
