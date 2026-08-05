@@ -18,7 +18,7 @@ async function checkContractVerification(network, address) {
   return { verified: true, rateLimited: false, riskyFunctions: null, abiText };
 }
 
-async function fetchTopHolderPct(network, tokenAddress, poolAddress) {
+async function fetchTopHolderPct(network, tokenAddress, poolAddress, totalSupplyRaw) {
   const url =
     `${network.explorerApi}?chainid=${network.chainId}&module=token&action=tokenholderlist` +
     `&contractaddress=${tokenAddress}&page=1&offset=10&apikey=${config.etherscanApiKey}`;
@@ -57,17 +57,4 @@ async function fetchTopHolderPct(network, tokenAddress, poolAddress) {
   return { pct: top.pct, holder: top.holder, available: true, rateLimited: false };
 }
 
-// This is a standard, well-documented Etherscan API endpoint/field --
-// higher confidence than the Blockscout guess above.
-async function getContractCreator(network, address) {
-  const url =
-    `${network.explorerApi}?chainid=${network.chainId}&module=contract&action=getcontractcreation` +
-    `&contractaddresses=${address}&apikey=${config.etherscanApiKey}`;
-  const data = await fetchJsonWithTimeout(url);
-  if (data && data.__rateLimited) return { creator: null, rateLimited: true };
-  const entry = data?.result?.[0];
-  const creator = entry?.contractCreator || null;
-  return { creator: creator ? creator.toLowerCase() : null, rateLimited: false };
-}
-
-module.exports = { checkContractVerification, fetchTopHolderPct, getContractCreator };
+module.exports = { checkContractVerification, fetchTopHolderPct };
