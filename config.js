@@ -6,6 +6,7 @@ const shared = {
   safuMinLiquidityEth: Number(process.env.SAFU_MIN_LIQUIDITY_ETH || 1),
   safuMaxEarlyConcentrationPct: Number(process.env.SAFU_MAX_EARLY_CONCENTRATION_PCT || 30),
   earlySniperWindowBlocks: Number(process.env.EARLY_SNIPER_WINDOW_BLOCKS || 5),
+  pumpWatchMinLiquidityEth: Number(process.env.PUMP_WATCH_MIN_LIQUIDITY_ETH || 0.5),
 
   dashboardPassword: process.env.DASHBOARD_PASSWORD || "change-me-please",
   sessionSecret: process.env.SESSION_SECRET || "insecure-dev-secret",
