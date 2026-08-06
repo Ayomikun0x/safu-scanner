@@ -73,6 +73,25 @@ const EIP1967_IMPLEMENTATION_SLOT =
 
 const OWNERSHIP_ABI = ["function owner() view returns (address)"];
 const TRANSFER_EVENT_ABI = ["event Transfer(address indexed from, address indexed to, uint256 value)"];
+const SWAP_EVENT_ABI = [
+  "event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)",
+];
+
+// Counts actual swap transactions on a pool between two blocks. Used as a
+// guard before flagging a "hit 2x" pattern -- a price that technically
+// crossed 2x on one or two thin trades isn't the same signal as real trading
+// volume pushing it there, so we require a minimum trade count too.
+async function countPoolSwaps(network, poolAddress, fromBlock, toBlock) {
+  try {
+    const { provider } = getContext(network);
+    const poolEvents = new ethers.Contract(poolAddress, SWAP_EVENT_ABI, provider);
+    const filter = poolEvents.filters.Swap();
+    const logs = await getLogsChunked(poolEvents, filter, fromBlock, toBlock, network.logChunkSize);
+    return logs.length;
+  } catch (err) {
+    return 0;
+  }
+}
 
 const DEPLOYER_GETTER_ABI = ["function deployer() view returns (address)"];
 
@@ -529,16 +548,26 @@ async function refreshKnownTokenPrices(network) {
           updatedRecord.peakPriceUsd = peakPriceUsd;
           updatedRecord.hit2xFlagged = record.hit2xFlagged || false;
 
-          if (
+if (
             !updatedRecord.hit2xFlagged &&
             launchPriceUsd &&
             peakPriceUsd >= launchPriceUsd * PUMP_WATCH_MULTIPLE &&
             record.deployerAddress
           ) {
-            const tokenKey = `${record.chain}:${record.tokenAddress}`;
-            db.recordDeployerHit2x(record.deployerAddress, tokenKey);
-            updatedRecord.hit2xFlagged = true;
-            console.log(`[${network.label}] ${record.symbol} (${record.tokenAddress}) hit ${PUMP_WATCH_MULTIPLE}x -- deployer ${record.deployerAddress} pattern updated.`);
+            const currentBlock = await withTimeout(provider.getBlockNumber(), 15000, "getBlockNumber for trade count").catch(() => null);
+            const tradeCount = currentBlock
+              ? await countPoolSwaps(network, record.poolAddress, record.blockNumber, currentBlock)
+              : 0;
+
+            if (tradeCount >= config.pumpWatchMinTrades) {
+              const tokenKey = `${record.chain}:${record.tokenAddress}`;
+              db.recordDeployerHit2x(record.deployerAddress, tokenKey);
+              updatedRecord.hit2xFlagged = true;
+              console.log(`[${network.label}] ${record.symbol} (${record.tokenAddress}) hit ${PUMP_WATCH_MULTIPLE}x with ${tradeCount} trades -- deployer ${record.deployerAddress} pattern updated.`);
+            }
+            // If trade count isn't there yet, price stays >= 2x and this
+            // check will simply run again next cycle until it clears (or
+            // never does, if it was a thin-volume spike).
           }
 
           const peakLiquidity = Math.max(record.peakLiquidity || 0, baseLiquidityFormatted);
