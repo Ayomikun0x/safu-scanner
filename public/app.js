@@ -138,7 +138,7 @@ function sniperBadge(t) {
 
 function pumpWatchBadge(t) {
   if (!t.isPumpWatch) return "";
-  return `<span class="badge badge-amber">⚠ Deployer pumps then rugs (${t.deployerHit2xCount || 0}x hit 2x+)</span>`;
+  return `<span class="badge badge-amber">⚠ Deployer: ${t.deployerLaunches || 0}/${t.deployerLaunches || 0} launches hit 2x+</span>`;
 }
 
 function renderCard(t, isNew) {
