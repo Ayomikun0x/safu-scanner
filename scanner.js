@@ -419,13 +419,14 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
     deployerOk &&
     snipingOk;
 
-  // Pump Watch: this deployer has a proven track record of rugging AND
-  // pumping tokens to 2x+ first. This is a historical pattern flag, entirely
-  // separate from isSafu -- it says nothing about THIS token's own safety,
-  // only about what this wallet has done before.
-const isPumpWatch =
-    deployerRecord.ruggedCount > 0 &&
-    deployerRecord.hit2xCount > 0 &&
+// Pump Watch now requires a genuinely strong track record: at least
+  // pumpWatchMinLaunches prior launches (this token excluded, per
+  // getDeployerRecordExcluding above), and every single one of them hit 2x+
+  // -- not just "at least one rug and one pump" as before. A perfect streak
+  // across 10+ tokens is a far rarer and more meaningful pattern.
+  const isPumpWatch =
+    deployerRecord.totalLaunches >= config.pumpWatchMinLaunches &&
+    deployerRecord.hit2xCount === deployerRecord.totalLaunches &&
     baseLiquidityFormatted >= config.pumpWatchMinLiquidityEth;
 
   return {
@@ -626,11 +627,11 @@ if (
             telegram.sendSafuAlert(updatedRecord);
           }
 
-          const newIsPumpWatch =
-            deployerRecord.ruggedCount > 0 &&
-            deployerRecord.hit2xCount > 0 &&
-            baseLiquidityFormatted >= config.pumpWatchMinLiquidityEth;
-          updatedRecord.isPumpWatch = newIsPumpWatch;
+        const newIsPumpWatch =
+      deployerRecord.totalLaunches >= config.pumpWatchMinLaunches &&
+      deployerRecord.hit2xCount === deployerRecord.totalLaunches &&
+      baseLiquidityFormatted >= config.pumpWatchMinLiquidityEth;
+    updatedRecord.isPumpWatch = newIsPumpWatch;
 
           if (newIsPumpWatch && !record.isPumpWatch && !record.pumpWatchAlertedAt) {
             updatedRecord.pumpWatchAlertedAt = Date.now();
