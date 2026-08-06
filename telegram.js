@@ -107,8 +107,8 @@ async function sendPumpWatchAlert(record) {
   const text =
     `⚠️ <b>PUMP WATCH — NOT SAFU (speculative pattern)</b>\n` +
     `${escapeHtml(record.name)} (${escapeHtml(record.symbol)}) · ${escapeHtml(record.chainLabel)}\n\n` +
-    `This deployer has rugged ${record.deployerRuggedCount || 0} of ${record.deployerLaunches || 0} prior launches, ` +
-    `but ${record.deployerHit2xCount || 0} hit 2x+ price before anything happened to them.\n\n` +
+    `This deployer has launched ${record.deployerLaunches || 0} prior tokens, and ALL ${record.deployerHit2xCount || 0} of them hit 2x+ ` +
+    `(${record.deployerRuggedCount || 0} of those were later confirmed rugged).\n\n` +
     `💰 ${formatCompactUsd(record.marketCapUsd)} MC  ·  ${formatCompactUsd(record.priceUsd)}  ·  ${record.baseLiquidity.toFixed(3)} ${record.baseSymbol} liquidity\n\n` +
     `<code>${record.tokenAddress}</code>\n\n` +
     `<a href="${explorerLink}">Explorer</a> · <a href="${poolLink}">Pool</a>\n\n` +
