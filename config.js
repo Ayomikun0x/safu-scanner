@@ -8,6 +8,7 @@ const shared = {
   earlySniperWindowBlocks: Number(process.env.EARLY_SNIPER_WINDOW_BLOCKS || 5),
   pumpWatchMinLiquidityEth: Number(process.env.PUMP_WATCH_MIN_LIQUIDITY_ETH || 0.5),
   pumpWatchMinTrades: Number(process.env.PUMP_WATCH_MIN_TRADES || 10),
+  pumpWatchMinLaunches: Number(process.env.PUMP_WATCH_MIN_LAUNCHES || 10),
 
   dashboardPassword: process.env.DASHBOARD_PASSWORD || "change-me-please",
   sessionSecret: process.env.SESSION_SECRET || "insecure-dev-secret",
