@@ -24,6 +24,7 @@ const shared = {
 
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || "",
   telegramChatId: process.env.TELEGRAM_CHAT_ID || "",
+  telegramEnabled: process.env.TELEGRAM_ENABLED !== "false",
 };
 
 const networks = [
