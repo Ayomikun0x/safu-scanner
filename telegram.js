@@ -13,7 +13,7 @@ function escapeHtml(str) {
 }
 
 async function sendTelegramMessage(text) {
-  if (!config.telegramBotToken || !config.telegramChatId) return;
+  if (!config.telegramEnabled || !config.telegramBotToken || !config.telegramChatId) return;  
   try {
     const url = `https://api.telegram.org/bot${config.telegramBotToken}/sendMessage`;
     const res = await fetch(url, {
