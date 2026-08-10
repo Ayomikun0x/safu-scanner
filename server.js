@@ -4,6 +4,7 @@ const session = require("express-session");
 const config = require("./config");
 const db = require("./db");
 const { scanOnce, forceResetScanLock } = require("./scanner");
+const { computeStats } = require("./utils/stats");
 const { withTimeout } = require("./utils/withTimeout");
 const app = express();
 app.use(express.json());
