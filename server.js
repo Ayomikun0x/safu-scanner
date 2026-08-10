@@ -45,6 +45,15 @@ app.use("/static", express.static(path.join(__dirname, "public")));
 app.get("/api/tokens", requireAuth, (req, res) => {
   res.json(db.getAll());
 });
+app.get("/api/stats", requireAuth, (req, res) => {
+  try {
+    const stats = computeStats(db.getAll());
+    res.json(stats);
+  } catch (err) {
+    console.error("Stats computation failed:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 app.post("/api/scan-now", requireAuth, async (req, res) => {
   try {
     const result = await scanOnce();
