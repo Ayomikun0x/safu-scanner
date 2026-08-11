@@ -12,14 +12,38 @@ function average(values) {
   return values.reduce((sum, v) => sum + v, 0) / values.length;
 }
 
+// Linear-interpolation percentile (same method spreadsheets typically use).
+// p is 0-100. Returns null on an empty array.
+function percentile(values, p) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  if (sorted.length === 1) return sorted[0];
+  const rank = (p / 100) * (sorted.length - 1);
+  const lower = Math.floor(rank);
+  const upper = Math.ceil(rank);
+  if (lower === upper) return sorted[lower];
+  const weight = rank - lower;
+  return sorted[lower] + (sorted[upper] - sorted[lower]) * weight;
+}
+
+function distributionSummary(values) {
+  return {
+    sampleSize: values.length,
+    min: values.length ? Math.min(...values) : null,
+    p25: percentile(values, 25),
+    p50: percentile(values, 50), // same as median, kept for clarity alongside other percentiles
+    p75: percentile(values, 75),
+    p90: percentile(values, 90),
+    p95: percentile(values, 95),
+    max: values.length ? Math.max(...values) : null,
+    average: average(values),
+  };
+}
+
 function isLpTrulyLocked(status) {
   return status === "locked" || status === "burned";
 }
 
-// Summarizes db.getAll() into real numbers instead of eyeballing dashboard
-// screenshots -- current pass rates, where tokens are actually failing, and
-// the real distribution of liquidity/concentration you're seeing, so
-// threshold tuning is based on your actual traffic, not guesswork.
 function computeStats(tokens) {
   const byChain = {};
 
@@ -126,22 +150,9 @@ function computeStats(tokens) {
       safuCount: c.safuCount,
       safuPassRate: c.totalTokens ? +((c.safuCount / c.totalTokens) * 100).toFixed(2) : 0,
       pumpWatchCount: c.pumpWatchCount,
-      liquidity: {
-        min: c.liquidityValues.length ? Math.min(...c.liquidityValues) : null,
-        max: c.liquidityValues.length ? Math.max(...c.liquidityValues) : null,
-        average: average(c.liquidityValues),
-        median: median(c.liquidityValues),
-      },
-      topHolderPct: {
-        sampleSize: c.topHolderValues.length,
-        average: average(c.topHolderValues),
-        median: median(c.topHolderValues),
-      },
-      earlySniperPct: {
-        sampleSize: c.earlySniperValues.length,
-        average: average(c.earlySniperValues),
-        median: median(c.earlySniperValues),
-      },
+      liquidity: distributionSummary(c.liquidityValues),
+      topHolderPct: distributionSummary(c.topHolderValues),
+      earlySniperPct: distributionSummary(c.earlySniperValues),
       failReasonCounts: c.failCounts,
       uniqueDeployers,
       deployersWithAtLeastOneRug: ruggedDeployers,
