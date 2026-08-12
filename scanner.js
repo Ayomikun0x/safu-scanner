@@ -647,12 +647,49 @@ if (
   }
 }
 
+// Runs full risk analysis on a single candidate pool, records it, and fires
+// alerts if warranted. Shared between the block-range poller (scanNetwork,
+// used by Stable Chain) and the WebSocket listener (used by Robinhood
+// Chain), so both paths produce identical records via one code path.
+async function processCandidate(network, candidate) {
+  const record = await withTimeout(
+    analyzeNewToken(network, candidate.newToken, candidate.baseToken, candidate.pool, candidate.blockNumber),
+    60000,
+    `analyzeNewToken ${candidate.newToken}`
+  );
+
+  const tokenKey = `${record.chain}:${record.tokenAddress}`;
+  if (record.deployerAddress) db.recordDeployerLaunch(record.deployerAddress, tokenKey);
+
+  if (record.isSafu) {
+    record.alertedAt = Date.now();
+    telegram.sendSafuAlert(record);
+  }
+  if (record.isPumpWatch) {
+    record.pumpWatchAlertedAt = Date.now();
+    telegram.sendPumpWatchAlert(record);
+  }
+
+  db.upsertToken(record);
+  console.log(`[${network.label}] Recorded: ${record.symbol} (${record.tokenAddress})`);
+  return record;
+}
+
 async function scanNetwork(network) {
   const { provider, factory } = getContext(network);
   const currentBlock = await withTimeout(provider.getBlockNumber(), 15000, "getBlockNumber");
 
   console.log(`[${network.label}] Refreshing prices for already-known tokens...`);
   await refreshKnownTokenPrices(network);
+
+  // Networks with pollNewPools === false discover new pools via a live
+  // WebSocket subscription instead (see robinhoodListener.js). Block-range
+  // polling for new pools is skipped for them entirely -- their RPC's
+  // eth_getLogs range cap makes it impractical anyway. Price refresh above
+  // still runs normally.
+  if (network.pollNewPools === false) {
+    return { network: network.key, scanned: 0, newTokens: 0 };
+  }
 
   const lastScanned = db.getLastScannedBlock(network.key);
   const fromBlock = lastScanned ? lastScanned + 1 : Math.max(0, currentBlock - network.initialLookbackBlocks);
@@ -703,28 +740,8 @@ async function scanNetwork(network) {
     // wait was silent, unnecessary Telegram delay: a fast token used to sit
     // blocked behind whichever batch-mate happened to be slowest.
     const batchPromises = batch.map((c) =>
-      withTimeout(
-        analyzeNewToken(network, c.newToken, c.baseToken, c.pool, c.blockNumber),
-        60000,
-        `analyzeNewToken ${c.newToken}`
-      )
-        .then((record) => {
-          const tokenKey = `${record.chain}:${record.tokenAddress}`;
-          if (record.deployerAddress) db.recordDeployerLaunch(record.deployerAddress, tokenKey);
-
-          if (record.isSafu) {
-            record.alertedAt = Date.now();
-            telegram.sendSafuAlert(record);
-          }
-          if (record.isPumpWatch) {
-            record.pumpWatchAlertedAt = Date.now();
-            telegram.sendPumpWatchAlert(record);
-          }
-
-          db.upsertToken(record);
-          newTokenCount += 1;
-          console.log(`[${network.label}] Recorded: ${record.symbol} (${record.tokenAddress})`);
-        })
+      processCandidate(network, c)
+        .then(() => { newTokenCount += 1; })
         .catch((err) => {
           console.error(`[${network.label}] Failed to analyze token ${c.newToken}:`, err.message);
         })
@@ -771,4 +788,4 @@ async function scanOnce() {
   }
 }
 
-module.exports = { scanOnce, forceResetScanLock };
+module.exports = { scanOnce, forceResetScanLock, processCandidate, getContext };
