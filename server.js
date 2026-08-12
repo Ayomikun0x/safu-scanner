@@ -4,6 +4,7 @@ const session = require("express-session");
 const config = require("./config");
 const db = require("./db");
 const { scanOnce, forceResetScanLock } = require("./scanner");
+const { startRobinhoodListener } = require("./robinhoodListener");
 const { computeStats } = require("./utils/stats");
 const { withTimeout } = require("./utils/withTimeout");
 const app = express();
@@ -89,4 +90,12 @@ async function runScanLoop() {
 app.listen(config.port, () => {
   console.log(`SAFU Scanner running on port ${config.port}`);
   runScanLoop();
+  // Robinhood Chain's new-pool discovery runs over a live WebSocket
+  // subscription (see robinhoodListener.js) instead of block-range polling,
+  // since the RPC's eth_getLogs range cap makes polling for ~1200-block
+  // windows every cycle unworkable. This starts once at boot and
+  // reconnects on its own if the socket drops.
+  startRobinhoodListener().catch((err) => {
+    console.error("Failed to start Robinhood WebSocket listener:", err.message);
+  });
 });
