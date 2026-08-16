@@ -3,11 +3,15 @@ const config = require("./config");
 const { FACTORY_ABI } = require("./abis");
 const { processCandidate } = require("./scanner");
 
-const RECONNECT_DELAY_MS = 5000;
+const BASE_RECONNECT_DELAY_MS = 5000;
+const MAX_RECONNECT_DELAY_MS = 2 * 60 * 1000; // 2 minutes
+const JITTER_MS = 1000;
 
 let currentProvider = null;
 let currentFactory = null;
-let reconnecting = false;
+let reconnectTimer = null; // set whenever a reconnect is already scheduled -- guards against overlapping attempts
+let connecting = false; // true while a connection attempt (construction through open/error) is in flight
+let reconnectAttempt = 0; // resets to 0 on a successful open; grows on each failure for backoff
 
 function getRobinhoodNetwork() {
   const network = config.networks.find((n) => n.key === "robinhood");
@@ -44,50 +48,105 @@ function attachFactoryListener(network, factory) {
   });
 }
 
+// Exponential backoff with jitter: 5s, 10s, 20s, 40s, 80s, capped at 2min.
+// Jitter avoids every retry landing on the exact same clock tick after a
+// shared rate-limit window resets.
+function nextReconnectDelay() {
+  const exp = Math.min(BASE_RECONNECT_DELAY_MS * 2 ** reconnectAttempt, MAX_RECONNECT_DELAY_MS);
+  const jitter = Math.floor(Math.random() * JITTER_MS);
+  return exp + jitter;
+}
+
 function scheduleReconnect(network) {
-  if (reconnecting) return;
-  reconnecting = true;
-  console.warn(`[${network.label}] (live) WebSocket disconnected, reconnecting in ${RECONNECT_DELAY_MS / 1000}s...`);
-  setTimeout(() => {
-    reconnecting = false;
+  // Only one reconnect timer may be pending at a time -- prevents the
+  // overlapping-attempt bug where a slow-closing old socket and a
+  // newly-scheduled attempt both fire around the same moment.
+  if (reconnectTimer) return;
+
+  const delay = nextReconnectDelay();
+  reconnectAttempt += 1;
+  console.warn(`[${network.label}] (live) WebSocket disconnected, reconnecting in ${(delay / 1000).toFixed(1)}s (attempt ${reconnectAttempt})...`);
+
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
     startRobinhoodListener().catch((err) => {
       console.error(`[${network.label}] (live) Reconnect attempt failed:`, err.message);
       scheduleReconnect(network);
     });
-  }, RECONNECT_DELAY_MS);
+  }, delay);
 }
 
 async function startRobinhoodListener() {
   const network = getRobinhoodNetwork();
 
+  // Don't start a second connection attempt while one is already in flight.
+  if (connecting) return;
+  connecting = true;
+
   // Tear down any previous socket cleanly before opening a new one.
   if (currentFactory) {
     try { currentFactory.removeAllListeners("PoolCreated"); } catch {}
+    currentFactory = null;
   }
   if (currentProvider) {
     try { currentProvider.destroy(); } catch {}
+    currentProvider = null;
   }
 
   const provider = new ethers.WebSocketProvider(network.wsUrl, network.chainId);
-  const factory = new ethers.Contract(network.factoryAddress, FACTORY_ABI, provider);
-
-  currentProvider = provider;
-  currentFactory = factory;
-
-  // ethers v6's underlying websocket exposes the raw ws client at
-  // provider.websocket -- wire up close/error so a dropped connection
-  // (idle timeout, network blip, provider restart) gets rediscovered
-  // instead of silently going quiet.
   const rawSocket = provider.websocket;
-  if (rawSocket) {
-    rawSocket.onclose = () => scheduleReconnect(network);
-    rawSocket.onerror = (err) => {
-      console.error(`[${network.label}] (live) WebSocket error:`, err?.message || err);
-    };
-  }
 
-  attachFactoryListener(network, factory);
-  console.log(`[${network.label}] (live) WebSocket subscription active for new pools.`);
+  let settled = false;
+
+  const onOpenSuccess = () => {
+    if (settled) return;
+    settled = true;
+    connecting = false;
+    reconnectAttempt = 0; // reset backoff after a clean connection
+    currentProvider = provider;
+    const factory = new ethers.Contract(network.factoryAddress, FACTORY_ABI, provider);
+    currentFactory = factory;
+    attachFactoryListener(network, factory);
+    console.log(`[${network.label}] (live) WebSocket subscription active for new pools.`);
+  };
+
+  const onFailure = (reason) => {
+    if (settled) {
+      // Socket closed after we were already up and running.
+      currentProvider = null;
+      currentFactory = null;
+      scheduleReconnect(network);
+      return;
+    }
+    settled = true;
+    connecting = false;
+    if (reason) console.error(`[${network.label}] (live) WebSocket error:`, reason?.message || reason);
+    try { provider.destroy(); } catch {}
+    scheduleReconnect(network);
+  };
+
+  if (rawSocket) {
+    // Most ws-like clients expose onopen/onclose/onerror. Only treat the
+    // connection as "active" once onopen actually fires -- constructing the
+    // provider doesn't guarantee the handshake succeeded, and Alchemy can
+    // reject at the handshake with a 429 before onopen ever fires.
+    rawSocket.onopen = onOpenSuccess;
+    rawSocket.onclose = () => onFailure(null);
+    rawSocket.onerror = (err) => onFailure(err);
+
+    // If the socket is already open by the time we attach handlers (can
+    // happen depending on the underlying ws implementation's timing),
+    // treat it as success immediately.
+    if (rawSocket.readyState === 1 /* OPEN */) {
+      onOpenSuccess();
+    }
+  } else {
+    // No raw socket exposed -- fall back to treating construction as
+    // success; errors will still surface via the provider's own error
+    // event handling in ethers, though we can't distinguish handshake
+    // rejection as precisely here.
+    onOpenSuccess();
+  }
 }
 
 module.exports = { startRobinhoodListener };
