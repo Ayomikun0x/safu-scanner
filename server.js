@@ -55,6 +55,15 @@ app.get("/api/stats", requireAuth, (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+app.get("/api/snipers", requireAuth, (req, res) => {
+  try {
+    const repeatSnipers = db.getRepeatSnipers(config.sniperRepeatMinLaunches);
+    res.json(repeatSnipers);
+  } catch (err) {
+    console.error("Snipers computation failed:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 app.post("/api/scan-now", requireAuth, async (req, res) => {
   try {
     const result = await scanOnce();
