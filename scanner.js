@@ -56,6 +56,7 @@ const MAX_SYMBOL_LENGTH = 15;
 const MAX_RECHECK_ATTEMPTS = 5;
 const LIQUIDITY_COLLAPSE_RATIO = 0.2;
 const PUMP_WATCH_MULTIPLE = 2; // price hitting 2x its launch price triggers "pumped" tracking
+const NOTABLE_SNIPER_WALLET_MIN_PCT = 1; // wallets holding at least this % of supply post-launch are tracked for cross-launch repeat-sniper pattern detection
 
 function sanitizeIdentity(raw, maxLength) {
   const str = String(raw || "").trim();
@@ -220,16 +221,27 @@ async function findEarlySnipers(network, tokenAddress, poolAddress, launchBlock,
     const positiveHolders = [...net.entries()].filter(([, amount]) => amount > 0);
 
     if (totalSupplyFormatted <= 0 || positiveHolders.length === 0) {
-      return { pct: 0, wallets: 0, windowBlocks: config.earlySniperWindowBlocks };
+      return { pct: 0, wallets: 0, windowBlocks: config.earlySniperWindowBlocks, topWallets: [] };
     }
 
-    const sorted = positiveHolders.map(([, amount]) => amount).sort((a, b) => b - a);
-    const topFew = sorted.slice(0, 3).reduce((sum, v) => sum + v, 0);
+    const sortedPairs = positiveHolders
+      .map(([address, amount]) => ({ address, amount }))
+      .sort((a, b) => b.amount - a.amount);
+
+    const topFew = sortedPairs.slice(0, 3).reduce((sum, w) => sum + w.amount, 0);
     const pct = Math.min((topFew / totalSupplyFormatted) * 100, 100);
 
-    return { pct, wallets: positiveHolders.length, windowBlocks: config.earlySniperWindowBlocks };
+    // Separate from the top-3 concentration score above -- this wider set
+    // (up to 5 wallets, >=1% of supply each) feeds cross-launch
+    // repeat-sniper tracking in db.js, not the SAFU disqualification check.
+    const topWallets = sortedPairs
+      .map((w) => ({ address: w.address, pctOfSupply: (w.amount / totalSupplyFormatted) * 100 }))
+      .filter((w) => w.pctOfSupply >= NOTABLE_SNIPER_WALLET_MIN_PCT)
+      .slice(0, 5);
+
+    return { pct, wallets: positiveHolders.length, windowBlocks: config.earlySniperWindowBlocks, topWallets };
   } catch (err) {
-    return { pct: null, wallets: null, windowBlocks: config.earlySniperWindowBlocks };
+    return { pct: null, wallets: null, windowBlocks: config.earlySniperWindowBlocks, topWallets: [] };
   }
 }
 
@@ -336,7 +348,7 @@ async function runSafetyChecks(network, tokenAddress, poolAddress, blockNumber, 
     withTimeout(
       findEarlySnipers(network, tokenAddress, poolAddress, blockNumber, totalSupplyFormatted, decimals),
       20000, "findEarlySnipers"
-    ).catch(() => ({ pct: null, wallets: null, windowBlocks: config.earlySniperWindowBlocks })),
+    ).catch(() => ({ pct: null, wallets: null, windowBlocks: config.earlySniperWindowBlocks, topWallets: [] })),
     withTimeout(getOnChainDeployer(network, tokenAddress), 10000, "getOnChainDeployer").catch(() => null),
   ]);
 
@@ -383,6 +395,22 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
 
   const deployerAddress = resolvedDeployer;
   const deployerRecord = deployerAddress ? db.getDeployerRecord(deployerAddress) : { totalLaunches: 0, ruggedCount: 0, hit2xCount: 0 };
+
+  // --- Sniper wallet tracking (cross-launch repeat pattern) ---
+  const sniperTokenKey = `${network.key}:${newTokenAddress.toLowerCase()}`;
+  const sniperWallets = (earlySnipers.topWallets || []).map((w) => {
+    db.recordSniperSighting(w.address, sniperTokenKey);
+    const sniperRecord = db.getSniperRecord(w.address);
+    return {
+      address: w.address,
+      pctOfSupply: w.pctOfSupply,
+      launchesCount: sniperRecord.launchesCount,
+      isRepeatSniper: sniperRecord.launchesCount >= config.sniperRepeatMinLaunches,
+    };
+  });
+  const isSniperFlagged =
+    (earlySnipers.pct !== null && earlySnipers.pct !== undefined && earlySnipers.pct >= config.sniperFlagMinPct) ||
+    sniperWallets.some((w) => w.isRepeatSniper);
 
   const baseLiquidityFormatted = Number(ethers.formatUnits(baseBalanceInPool, 18));
   const newTokenReserveFormatted = Number(ethers.formatUnits(newTokenBalanceInPool, decimals));
@@ -463,6 +491,8 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
     deployerHit2xCount: deployerRecord.hit2xCount,
     earlySniperPct: earlySnipers.pct,
     earlySniperWallets: earlySnipers.wallets,
+    sniperWallets,
+    isSniperFlagged,
     isSafu,
     isPumpWatch,
     pumpWatchAlertedAt: null,
@@ -649,8 +679,8 @@ if (
 
 // Runs full risk analysis on a single candidate pool, records it, and fires
 // alerts if warranted. Shared between the block-range poller (scanNetwork,
-// used by Stable Chain) and the WebSocket listener (used by Robinhood
-// Chain), so both paths produce identical records via one code path.
+// used by BSC) and the WebSocket listener (used by Robinhood Chain), so
+// both paths produce identical records via one code path.
 async function processCandidate(network, candidate) {
   const record = await withTimeout(
     analyzeNewToken(network, candidate.newToken, candidate.baseToken, candidate.pool, candidate.blockNumber),
