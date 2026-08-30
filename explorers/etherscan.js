@@ -6,7 +6,6 @@ async function checkContractVerification(network, address) {
     `${network.explorerApi}?chainid=${network.chainId}&module=contract&action=getsourcecode` +
     `&address=${address}&apikey=${config.etherscanApiKey}`;
   const data = await fetchJsonWithTimeout(url);
-
   if (data && data.__rateLimited) {
     return { verified: null, rateLimited: true, riskyFunctions: [], abiText: "" };
   }
@@ -23,20 +22,17 @@ async function fetchTopHolderPct(network, tokenAddress, poolAddress, totalSupply
     `${network.explorerApi}?chainid=${network.chainId}&module=token&action=tokenholderlist` +
     `&contractaddress=${tokenAddress}&page=1&offset=10&apikey=${config.etherscanApiKey}`;
   const data = await fetchJsonWithTimeout(url);
-
   if (data && data.__rateLimited) {
     return { pct: null, holder: null, available: null, rateLimited: true };
   }
   if (!data || data.status !== "1" || !Array.isArray(data.result)) {
     return { pct: null, holder: null, available: false, rateLimited: false };
   }
-
   const excluded = new Set([
     poolAddress.toLowerCase(),
     "0x0000000000000000000000000000000000dead",
     "0x0000000000000000000000000000000000000000",
   ]);
-
   let top = { pct: null, holder: null };
   let sawAnyHolder = false;
   for (const item of data.result) {
@@ -49,12 +45,30 @@ async function fetchTopHolderPct(network, tokenAddress, poolAddress, totalSupply
       top = { pct, holder: holderAddress };
     }
   }
-
   if (!sawAnyHolder) {
     return { pct: 0, holder: null, available: true, rateLimited: false };
   }
-
   return { pct: top.pct, holder: top.holder, available: true, rateLimited: false };
 }
 
-module.exports = { checkContractVerification, fetchTopHolderPct };
+// Looks up the wallet that deployed a contract, via Etherscan V2's
+// "getcontractcreation" action. This is what scanner.js falls back to when
+// the token contract itself doesn't expose a deployer()/owner() getter --
+// without it, deployer reputation tracking (rugged/pumped history) and the
+// new sniper wallet tracking have nothing to key off of for this token.
+async function getContractCreator(network, tokenAddress) {
+  const url =
+    `${network.explorerApi}?chainid=${network.chainId}&module=contract&action=getcontractcreation` +
+    `&contractaddresses=${tokenAddress}&apikey=${config.etherscanApiKey}`;
+  const data = await fetchJsonWithTimeout(url);
+  if (data && data.__rateLimited) {
+    return { creator: null, rateLimited: true };
+  }
+  const entry = data?.result?.[0];
+  if (!entry || !entry.contractCreator) {
+    return { creator: null, rateLimited: false };
+  }
+  return { creator: entry.contractCreator.toLowerCase(), rateLimited: false };
+}
+
+module.exports = { checkContractVerification, fetchTopHolderPct, getContractCreator };
