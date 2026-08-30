@@ -5,6 +5,8 @@ const shared = {
   safuMinLiquidityEth: Number(process.env.SAFU_MIN_LIQUIDITY_ETH || 1),
   safuMaxEarlyConcentrationPct: Number(process.env.SAFU_MAX_EARLY_CONCENTRATION_PCT || 30),
   earlySniperWindowBlocks: Number(process.env.EARLY_SNIPER_WINDOW_BLOCKS || 5),
+  sniperFlagMinPct: Number(process.env.SNIPER_FLAG_MIN_PCT || 15),
+  sniperRepeatMinLaunches: Number(process.env.SNIPER_REPEAT_MIN_LAUNCHES || 3),
   pumpWatchMinLiquidityEth: Number(process.env.PUMP_WATCH_MIN_LIQUIDITY_ETH || 0.5),
   pumpWatchMinTrades: Number(process.env.PUMP_WATCH_MIN_TRADES || 10),
   pumpWatchMinLaunches: Number(process.env.PUMP_WATCH_MIN_LAUNCHES || 10),
@@ -47,6 +49,8 @@ const networks = [
     // chain's block speed. New-pool discovery runs over a WebSocket
     // subscription instead (see robinhoodListener.js); the polling loop
     // below still handles price refresh for already-known Robinhood tokens.
+    // NOTE: the WebSocket connection is currently failing at handshake
+    // (400 response) -- still needs its own fix, tracked separately.
     pollNewPools: false,
     chainId: 4663,
     factoryAddress: "0x1f7d7550b1b028f7571e69a784071f0205fd2efa",
@@ -71,26 +75,30 @@ const networks = [
     ]),
   },
   {
-    key: "stable",
-    label: "Stable Chain",
-    rpcUrl: process.env.STABLE_RPC_URL || "https://rpc.stable.xyz",
+    key: "bsc",
+    label: "BSC",
+    rpcUrl: process.env.BSC_RPC_URL || "https://bsc-dataseed.binance.org/",
     wsUrl: null,
+    // Public BSC nodes are far less restrictive than Alchemy's free tier
+    // was for Robinhood Chain, so plain block-range polling works fine
+    // here -- no WebSocket listener needed.
     pollNewPools: true,
-    chainId: 988,
-    factoryAddress: "0x88f0a512ef09175d456bc9547f914f48c013e4aa",
-    positionManagerAddress: "0x3bdc3437405f7d801b6036532713fc1f179136a6",
+    chainId: 56,
+    factoryAddress: "0x0bfbcf9fa4f9c56b0f40a671ad40e0805a091865", // PancakeSwap V3 Factory
+    positionManagerAddress: "0x46a15b0b27311cedf172ab29e4f4766fbe7f4364", // PancakeSwap V3 NonfungiblePositionManager
     explorerType: "etherscan",
     explorerApi: "https://api.etherscan.io/v2/api",
-    explorerAddressBase: "https://stablescan.xyz/address/",
-    uniswapPoolUrlBase: "https://stablescan.xyz/address/",
-    initialLookbackBlocks: Number(process.env.STABLE_INITIAL_LOOKBACK_BLOCKS || 7700),
-    logChunkSize: Number(process.env.STABLE_LOG_CHUNK_SIZE || 500),
-    baseAssetSymbolFallback: "USDT0",
+    explorerAddressBase: "https://bscscan.com/address/",
+    uniswapPoolUrlBase: "https://bscscan.com/address/",
+    initialLookbackBlocks: Number(process.env.BSC_INITIAL_LOOKBACK_BLOCKS || 2000),
+    logChunkSize: Number(process.env.BSC_LOG_CHUNK_SIZE || 2000),
+    baseAssetSymbolFallback: "WBNB",
     knownBaseTokens: new Set([
-      "0x779ded0c9e1022225f8e0630b35a9b54be713736",
+      "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c", // WBNB
+      "0x55d398326f99059ff775485246999027b3197955", // USDT (Binance-Peg BSC-USD)
     ]),
     usdStableBases: new Set([
-      "0x779ded0c9e1022225f8e0630b35a9b54be713736",
+      "0x55d398326f99059ff775485246999027b3197955",
     ]),
     knownLockerContracts: new Set([]),
   },
