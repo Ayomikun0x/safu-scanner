@@ -44,13 +44,10 @@ const networks = [
     label: "Robinhood Chain",
     rpcUrl: robinhoodRpcUrl,
     wsUrl: deriveWsUrl(process.env.RH_WS_URL, robinhoodRpcUrl),
-    // Robinhood Chain's RPC (Alchemy free tier) caps eth_getLogs to a 10
-    // block range, which makes polling for new pools impractical at this
-    // chain's block speed. New-pool discovery runs over a WebSocket
-    // subscription instead (see robinhoodListener.js); the polling loop
-    // below still handles price refresh for already-known Robinhood tokens.
-    // NOTE: the WebSocket connection is currently failing at handshake
-    // (400 response) -- still needs its own fix, tracked separately.
+    // New-pool discovery runs over a WebSocket subscription (see
+    // robinhoodListener.js) since Robinhood Chain's RPC caps eth_getLogs to
+    // a tiny block range on the free tier. The polling loop below still
+    // handles price refresh for already-known tokens.
     pollNewPools: false,
     chainId: 4663,
     factoryAddress: "0x1f7d7550b1b028f7571e69a784071f0205fd2efa",
@@ -73,34 +70,6 @@ const networks = [
       "0x736d76699c26d0d966744cae304c000d471f7f35",
       "0x31ca5e101941a93a7dd6d0497928700625cf54b5",
     ]),
-  },
-  {
-    key: "bsc",
-    label: "BSC",
-    rpcUrl: process.env.BSC_RPC_URL || "https://bsc-dataseed.binance.org/",
-    wsUrl: null,
-    // Public BSC nodes are far less restrictive than Alchemy's free tier
-    // was for Robinhood Chain, so plain block-range polling works fine
-    // here -- no WebSocket listener needed.
-    pollNewPools: true,
-    chainId: 56,
-    factoryAddress: "0x0bfbcf9fa4f9c56b0f40a671ad40e0805a091865", // PancakeSwap V3 Factory
-    positionManagerAddress: "0x46a15b0b27311cedf172ab29e4f4766fbe7f4364", // PancakeSwap V3 NonfungiblePositionManager
-    explorerType: "etherscan",
-    explorerApi: "https://api.etherscan.io/v2/api",
-    explorerAddressBase: "https://bscscan.com/address/",
-    uniswapPoolUrlBase: "https://bscscan.com/address/",
-    initialLookbackBlocks: Number(process.env.BSC_INITIAL_LOOKBACK_BLOCKS || 2000),
-    logChunkSize: Number(process.env.BSC_LOG_CHUNK_SIZE || 2000),
-    baseAssetSymbolFallback: "WBNB",
-    knownBaseTokens: new Set([
-      "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c", // WBNB
-      "0x55d398326f99059ff775485246999027b3197955", // USDT (Binance-Peg BSC-USD)
-    ]),
-    usdStableBases: new Set([
-      "0x55d398326f99059ff775485246999027b3197955",
-    ]),
-    knownLockerContracts: new Set([]),
   },
 ];
 
