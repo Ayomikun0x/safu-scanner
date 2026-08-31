@@ -1,6 +1,6 @@
 const SEEN_KEY = "safu_scanner_seen_tokens";
 const DUST_THRESHOLD_ETH = 0.05;
-const CHAIN_ORDER = ["robinhood", "stable"];
+const CHAIN_ORDER = ["robinhood", "bsc"];
 
 function formatAge(timestampMs) {
   const seconds = Math.floor((Date.now() - timestampMs) / 1000);
@@ -136,6 +136,13 @@ function sniperBadge(t) {
   return `<span class="badge ${cls}">Early buyers: ${pct.toFixed(0)}%</span>`;
 }
 
+function repeatSniperBadge(t) {
+  if (t.sniperWallets && t.sniperWallets.some((w) => w.isRepeatSniper)) {
+    return `<span class="badge badge-red">🎯 Repeat sniper wallet involved</span>`;
+  }
+  return "";
+}
+
 function pumpWatchBadge(t) {
   if (!t.isPumpWatch) return "";
   return `<span class="badge badge-amber">⚠ Deployer: ${t.deployerLaunches || 0}/${t.deployerLaunches || 0} launches hit 2x+</span>`;
@@ -169,6 +176,7 @@ function renderCard(t, isNew) {
         ${ownershipBadge(t)}
         ${deployerBadge(t)}
         ${sniperBadge(t)}
+        ${repeatSniperBadge(t)}
         ${spoofBadge(t)}
         ${pumpWatchBadge(t)}
       </div>
@@ -205,7 +213,7 @@ function attachCopyHandlers(container) {
   });
 }
 
-function renderChainSection(chainKey, chainLabel, allTokens, safuTokens, pumpWatchTokens, isNewFn) {
+function renderChainSection(chainKey, chainLabel, allTokens, safuTokens, pumpWatchTokens, sniperTokens, isNewFn) {
   return `
     <section class="chain-section">
       <h2 class="chain-title">${chainLabel}</h2>
@@ -245,8 +253,63 @@ function renderChainSection(chainKey, chainLabel, allTokens, safuTokens, pumpWat
             : `<p class="column-empty">No repeat pump-then-rug patterns detected yet.</p>`}
         </div>
       </div>
+      <div class="sniper-section">
+        <div class="column-head">
+          <h3>🎯 Snipers <span class="column-sub">heavy early-buyer concentration, or a wallet flagged as a repeat sniper across multiple launches</span></h3>
+          <span class="count-pill">${sniperTokens.length}</span>
+        </div>
+        <p class="disclaimer">High early concentration isn't automatically malicious, but it's worth knowing who got in first and how much of supply they hold.</p>
+        <div class="card-list">
+          ${sniperTokens.length
+            ? sniperTokens.map((t) => renderCard(t, isNewFn(t))).join("")
+            : `<p class="column-empty">No sniper-heavy launches detected yet.</p>`}
+        </div>
+      </div>
     </section>
   `;
+}
+
+function renderRepeatSnipers(repeatSnipers) {
+  if (!repeatSnipers.length) {
+    return `
+      <section class="repeat-snipers-section">
+        <div class="column-head">
+          <h2>🎯 Repeat Snipers <span class="column-sub">wallets seen as early buyers across multiple different launches, any chain</span></h2>
+          <span class="count-pill">0</span>
+        </div>
+        <p class="column-empty">No repeat-sniper wallets identified yet.</p>
+      </section>
+    `;
+  }
+  const rows = repeatSnipers
+    .map(
+      (s) => `
+    <div class="sniper-wallet-row">
+      <span class="token-addr">${s.wallet}</span>
+      <button class="copy-btn" data-addr="${s.wallet}">Copy</button>
+      <span class="badge badge-amber">${s.launchesCount} launches</span>
+    </div>`
+    )
+    .join("");
+  return `
+    <section class="repeat-snipers-section">
+      <div class="column-head">
+        <h2>🎯 Repeat Snipers <span class="column-sub">wallets seen as early buyers across multiple different launches, any chain</span></h2>
+        <span class="count-pill">${repeatSnipers.length}</span>
+      </div>
+      <div class="sniper-wallet-list">${rows}</div>
+    </section>
+  `;
+}
+
+function ensureRepeatSnipersContainer() {
+  let el = document.getElementById("repeatSnipersSection");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "repeatSnipersSection";
+    document.getElementById("chainSections").insertAdjacentElement("beforebegin", el);
+  }
+  return el;
 }
 
 async function loadTokens({ scanFirst } = {}) {
@@ -260,8 +323,12 @@ async function loadTokens({ scanFirst } = {}) {
     }
   }
 
-  const res = await fetch("/api/tokens");
-  const tokens = await res.json();
+  const [tokensRes, snipersRes] = await Promise.all([
+    fetch("/api/tokens"),
+    fetch("/api/snipers"),
+  ]);
+  const tokens = await tokensRes.json();
+  const repeatSnipers = await snipersRes.json();
 
   const hideSpam = document.getElementById("hideSpamToggle").checked;
   const sortBy = document.getElementById("sortSelect").value;
@@ -294,17 +361,22 @@ async function loadTokens({ scanFirst } = {}) {
     const { label, tokens: chainTokens } = byChain.get(key);
     const safuTokens = chainTokens.filter((t) => t.isSafu).sort(sortFn);
     const pumpWatchTokens = chainTokens.filter((t) => t.isPumpWatch).sort(sortFn);
+    const sniperTokens = chainTokens.filter((t) => t.isSniperFlagged).sort(sortFn);
     let allTokens = hideSpam
       ? chainTokens.filter((t) => t.baseLiquidity >= DUST_THRESHOLD_ETH)
       : chainTokens;
     allTokens = [...allTokens].sort(sortFn);
 
-    html += renderChainSection(key, label, allTokens, safuTokens, pumpWatchTokens, isNew);
+    html += renderChainSection(key, label, allTokens, safuTokens, pumpWatchTokens, sniperTokens, isNew);
   }
 
   const container = document.getElementById("chainSections");
   container.innerHTML = html || `<p class="column-empty">No chains have data yet.</p>`;
   attachCopyHandlers(container);
+
+  const repeatSnipersContainer = ensureRepeatSnipersContainer();
+  repeatSnipersContainer.innerHTML = renderRepeatSnipers(repeatSnipers);
+  attachCopyHandlers(repeatSnipersContainer);
 
   tokens.forEach((t) => seen.add(`${t.chain}:${t.tokenAddress}`));
   saveSeenAddresses(seen);
