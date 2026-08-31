@@ -24,10 +24,6 @@ const shared = {
   telegramEnabled: process.env.TELEGRAM_ENABLED !== "false",
 };
 
-// Derives a wss:// URL from an https:// RPC URL when no explicit RH_WS_URL
-// is provided. Works for the common case (Alchemy, and most providers)
-// where the WebSocket endpoint lives at the same host/path, just a
-// different scheme.
 function deriveWsUrl(explicitWsUrl, httpUrl) {
   if (explicitWsUrl) return explicitWsUrl;
   if (!httpUrl) return null;
@@ -44,10 +40,29 @@ const networks = [
     label: "Robinhood Chain",
     rpcUrl: robinhoodRpcUrl,
     wsUrl: deriveWsUrl(process.env.RH_WS_URL, robinhoodRpcUrl),
-    // Switched back to block-range polling: Robinhood Chain is very new,
-    // and Alchemy's log-subscription feature (eth_subscribe("logs", ...))
-    // isn't confirmed supported for it yet -- the WebSocket connects fine,
-    // but never actually delivers PoolCreated events. Polling in small
-    // chunks (see logChunkSize) avoids depending on that feature entirely.
-    // The WebSocket listener (robinhoodListener.js) still runs alongside
-    // this as a bonus/backup in case subscriptions start
+    pollNewPools: true,
+    chainId: 4663,
+    factoryAddress: "0x1f7d7550b1b028f7571e69a784071f0205fd2efa",
+    positionManagerAddress: "0x73991a25c818bf1f1128deaab1492d45638de0d3",
+    explorerType: "blockscout",
+    explorerApi: "https://robinhoodchain.blockscout.com/api/v2",
+    explorerAddressBase: "https://robinhoodchain.blockscout.com/address/",
+    uniswapPoolUrlBase: "https://app.uniswap.org/explore/pools/robinhoodchain/",
+    initialLookbackBlocks: Number(process.env.RH_INITIAL_LOOKBACK_BLOCKS || 10800),
+    logChunkSize: Number(process.env.RH_LOG_CHUNK_SIZE || 10),
+    baseAssetSymbolFallback: "WETH",
+    knownBaseTokens: new Set([
+      "0x0bd7d308f8e1639fab988df18a8011f41eacad73",
+      "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+    ]),
+    usdStableBases: new Set([
+      "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+    ]),
+    knownLockerContracts: new Set([
+      "0x736d76699c26d0d966744cae304c000d471f7f35",
+      "0x31ca5e101941a93a7dd6d0497928700625cf54b5",
+    ]),
+  },
+];
+
+module.exports = { ...shared, networks };
