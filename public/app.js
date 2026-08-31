@@ -1,6 +1,6 @@
 const SEEN_KEY = "safu_scanner_seen_tokens";
 const DUST_THRESHOLD_ETH = 0.05;
-const CHAIN_ORDER = ["robinhood", "bsc"];
+const CHAIN_ORDER = ["robinhood"];
 
 function formatAge(timestampMs) {
   const seconds = Math.floor((Date.now() - timestampMs) / 1000);
