@@ -78,10 +78,6 @@ const SWAP_EVENT_ABI = [
   "event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)",
 ];
 
-// Counts actual swap transactions on a pool between two blocks. Used as a
-// guard before flagging a "hit 2x" pattern -- a price that technically
-// crossed 2x on one or two thin trades isn't the same signal as real trading
-// volume pushing it there, so we require a minimum trade count too.
 async function countPoolSwaps(network, poolAddress, fromBlock, toBlock) {
   try {
     const { provider } = getContext(network);
@@ -109,22 +105,42 @@ async function getOnChainDeployer(network, tokenAddress) {
 
 const DEFAULT_LOG_CHUNK_SIZE = 2000;
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Fetches logs in chunks, retrying each chunk once on a transient failure
+// (timeouts, 503s, rate limits) before giving up on it. Chains with very
+// small chunk sizes (like Robinhood's 10-block chunks, forced by its RPC's
+// eth_getLogs range cap) fire far more requests per scan, so a brief pause
+// between chunks avoids bursting a fresh API key's rate limit -- larger
+// chunk sizes already mean few enough calls that this isn't needed.
 async function getLogsChunked(contract, eventFilter, fromBlock, toBlock, chunkSize = DEFAULT_LOG_CHUNK_SIZE) {
   const allLogs = [];
   let start = fromBlock;
   while (start <= toBlock) {
     const end = Math.min(start + chunkSize - 1, toBlock);
-    try {
-      const logs = await withTimeout(
-        contract.queryFilter(eventFilter, start, end),
-        20000,
-        `queryFilter blocks ${start}-${end}`
-      );
-      allLogs.push(...logs);
-    } catch (err) {
-      console.error(`Log fetch failed for blocks ${start}-${end}:`, err.message);
+    let attempt = 0;
+    while (attempt < 2) {
+      try {
+        const logs = await withTimeout(
+          contract.queryFilter(eventFilter, start, end),
+          20000,
+          `queryFilter blocks ${start}-${end}`
+        );
+        allLogs.push(...logs);
+        break;
+      } catch (err) {
+        attempt += 1;
+        if (attempt >= 2) {
+          console.error(`Log fetch failed for blocks ${start}-${end}:`, err.message);
+        } else {
+          await sleep(300);
+        }
+      }
     }
     start = end + 1;
+    if (chunkSize <= 20) await sleep(75);
   }
   return allLogs;
 }
@@ -231,9 +247,6 @@ async function findEarlySnipers(network, tokenAddress, poolAddress, launchBlock,
     const topFew = sortedPairs.slice(0, 3).reduce((sum, w) => sum + w.amount, 0);
     const pct = Math.min((topFew / totalSupplyFormatted) * 100, 100);
 
-    // Separate from the top-3 concentration score above -- this wider set
-    // (up to 5 wallets, >=1% of supply each) feeds cross-launch
-    // repeat-sniper tracking in db.js, not the SAFU disqualification check.
     const topWallets = sortedPairs
       .map((w) => ({ address: w.address, pctOfSupply: (w.amount / totalSupplyFormatted) * 100 }))
       .filter((w) => w.pctOfSupply >= NOTABLE_SNIPER_WALLET_MIN_PCT)
@@ -396,7 +409,6 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
   const deployerAddress = resolvedDeployer;
   const deployerRecord = deployerAddress ? db.getDeployerRecord(deployerAddress) : { totalLaunches: 0, ruggedCount: 0, hit2xCount: 0 };
 
-  // --- Sniper wallet tracking (cross-launch repeat pattern) ---
   const sniperTokenKey = `${network.key}:${newTokenAddress.toLowerCase()}`;
   const sniperWallets = (earlySnipers.topWallets || []).map((w) => {
     db.recordSniperSighting(w.address, sniperTokenKey);
@@ -447,11 +459,6 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
     deployerOk &&
     snipingOk;
 
-// Pump Watch now requires a genuinely strong track record: at least
-  // pumpWatchMinLaunches prior launches (this token excluded, per
-  // getDeployerRecordExcluding above), and every single one of them hit 2x+
-  // -- not just "at least one rug and one pump" as before. A perfect streak
-  // across 10+ tokens is a far rarer and more meaningful pattern.
   const isPumpWatch =
     deployerRecord.totalLaunches >= config.pumpWatchMinLaunches &&
     deployerRecord.hit2xCount === deployerRecord.totalLaunches &&
@@ -571,15 +578,12 @@ async function refreshKnownTokenPrices(network) {
             };
           }
 
-          // Track peak price and flag a "hit 2x" event on this deployer the
-          // first time this token's price reaches PUMP_WATCH_MULTIPLE x its
-          // launch price. Only fires once per token (hit2xFlagged guards it).
           const launchPriceUsd = record.launchPriceUsd ?? null;
           const peakPriceUsd = Math.max(record.peakPriceUsd || 0, priceUsd || 0);
           updatedRecord.peakPriceUsd = peakPriceUsd;
           updatedRecord.hit2xFlagged = record.hit2xFlagged || false;
 
-if (
+          if (
             !updatedRecord.hit2xFlagged &&
             launchPriceUsd &&
             peakPriceUsd >= launchPriceUsd * PUMP_WATCH_MULTIPLE &&
@@ -596,9 +600,6 @@ if (
               updatedRecord.hit2xFlagged = true;
               console.log(`[${network.label}] ${record.symbol} (${record.tokenAddress}) hit ${PUMP_WATCH_MULTIPLE}x with ${tradeCount} trades -- deployer ${record.deployerAddress} pattern updated.`);
             }
-            // If trade count isn't there yet, price stays >= 2x and this
-            // check will simply run again next cycle until it clears (or
-            // never does, if it was a thin-volume spike).
           }
 
           const peakLiquidity = Math.max(record.peakLiquidity || 0, baseLiquidityFormatted);
@@ -657,11 +658,11 @@ if (
             telegram.sendSafuAlert(updatedRecord);
           }
 
-        const newIsPumpWatch =
-      deployerRecord.totalLaunches >= config.pumpWatchMinLaunches &&
-      deployerRecord.hit2xCount === deployerRecord.totalLaunches &&
-      baseLiquidityFormatted >= config.pumpWatchMinLiquidityEth;
-    updatedRecord.isPumpWatch = newIsPumpWatch;
+          const newIsPumpWatch =
+            deployerRecord.totalLaunches >= config.pumpWatchMinLaunches &&
+            deployerRecord.hit2xCount === deployerRecord.totalLaunches &&
+            baseLiquidityFormatted >= config.pumpWatchMinLiquidityEth;
+          updatedRecord.isPumpWatch = newIsPumpWatch;
 
           if (newIsPumpWatch && !record.isPumpWatch && !record.pumpWatchAlertedAt) {
             updatedRecord.pumpWatchAlertedAt = Date.now();
@@ -677,10 +678,6 @@ if (
   }
 }
 
-// Runs full risk analysis on a single candidate pool, records it, and fires
-// alerts if warranted. Shared between the block-range poller (scanNetwork,
-// used by BSC) and the WebSocket listener (used by Robinhood Chain), so
-// both paths produce identical records via one code path.
 async function processCandidate(network, candidate) {
   const record = await withTimeout(
     analyzeNewToken(network, candidate.newToken, candidate.baseToken, candidate.pool, candidate.blockNumber),
@@ -712,11 +709,6 @@ async function scanNetwork(network) {
   console.log(`[${network.label}] Refreshing prices for already-known tokens...`);
   await refreshKnownTokenPrices(network);
 
-  // Networks with pollNewPools === false discover new pools via a live
-  // WebSocket subscription instead (see robinhoodListener.js). Block-range
-  // polling for new pools is skipped for them entirely -- their RPC's
-  // eth_getLogs range cap makes it impractical anyway. Price refresh above
-  // still runs normally.
   if (network.pollNewPools === false) {
     return { network: network.key, scanned: 0, newTokens: 0 };
   }
@@ -765,10 +757,6 @@ async function scanNetwork(network) {
   for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
     const batch = candidates.slice(i, i + BATCH_SIZE);
 
-    // Each token handles its own db write and alert(s) the moment ITS OWN
-    // analysis resolves -- not after waiting for the rest of the batch. That
-    // wait was silent, unnecessary Telegram delay: a fast token used to sit
-    // blocked behind whichever batch-mate happened to be slowest.
     const batchPromises = batch.map((c) =>
       processCandidate(network, c)
         .then(() => { newTokenCount += 1; })
