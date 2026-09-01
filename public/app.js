@@ -2,6 +2,8 @@ const SEEN_KEY = "safu_scanner_seen_tokens";
 const DUST_THRESHOLD_ETH = 0.05;
 const CHAIN_ORDER = ["robinhood"];
 
+let filterState = { activeFilter: "all", minLiquidity: 0 };
+
 function formatAge(timestampMs) {
   const seconds = Math.floor((Date.now() - timestampMs) / 1000);
   if (seconds < 60) return `${seconds}s ago`;
@@ -213,10 +215,75 @@ function attachCopyHandlers(container) {
   });
 }
 
-function renderChainSection(chainKey, chainLabel, allTokens, safuTokens, pumpWatchTokens, sniperTokens, isNewFn) {
+// Buckets tokens into hourly counts for the last `hours` hours, most recent
+// hour last, for the activity sparkline in the terminal header.
+function computeHourlyActivity(tokens, hours) {
+  const now = Date.now();
+  const buckets = new Array(hours).fill(0);
+  for (const t of tokens) {
+    const ts = t.launchedAt || t.scannedAt;
+    if (!ts) continue;
+    const hoursAgo = Math.floor((now - ts) / (60 * 60 * 1000));
+    if (hoursAgo >= 0 && hoursAgo < hours) {
+      buckets[hours - 1 - hoursAgo] += 1;
+    }
+  }
+  return buckets;
+}
+
+function renderTerminalHeader(chainLabel, allTokens, safuTokens, pumpWatchTokens, sniperTokens, ruggedTokens) {
+  const buckets = computeHourlyActivity(allTokens, 12);
+  const maxBucket = Math.max(...buckets, 1);
+  const barsHtml = buckets
+    .map((count) => {
+      const pct = count > 0 ? Math.max((count / maxBucket) * 100, 15) : 4;
+      return `<div class="term-bar" style="height:${pct}%;"></div>`;
+    })
+    .join("");
+
+  const chip = (key, label) =>
+    `<button class="term-chip ${filterState.activeFilter === key ? "term-chip-active" : ""}" data-filter="${key}">${label}</button>`;
+
+  return `
+    <div class="terminal-header">
+      <div class="terminal-topline">
+        <span class="terminal-title">◈ SAFU_SCANNER // ${chainLabel.toUpperCase().replace(/ /g, "_")}</span>
+        <span class="terminal-live">LIVE</span>
+      </div>
+      <div class="terminal-stats-row">
+        <div class="terminal-stat"><span class="terminal-stat-label">SCANNED</span><span class="terminal-stat-value">${allTokens.length}</span></div>
+        <div class="terminal-stat"><span class="terminal-stat-label">SAFU</span><span class="terminal-stat-value terminal-green">${safuTokens.length}</span></div>
+        <div class="terminal-stat"><span class="terminal-stat-label">PUMP_WATCH</span><span class="terminal-stat-value terminal-amber">${pumpWatchTokens.length}</span></div>
+        <div class="terminal-stat"><span class="terminal-stat-label">SNIPERS</span><span class="terminal-stat-value terminal-amber">${sniperTokens.length}</span></div>
+        <div class="terminal-stat"><span class="terminal-stat-label">RUGGED</span><span class="terminal-stat-value terminal-red">${ruggedTokens.length}</span></div>
+      </div>
+      <div class="terminal-activity-row">
+        <span class="terminal-activity-label">12H_ACTIVITY</span>
+        <div class="terminal-bars">${barsHtml}</div>
+      </div>
+      <div class="terminal-chip-row">
+        ${chip("all", "ALL")}
+        ${chip("verified", "VERIFIED")}
+        ${chip("safu", "SAFU")}
+        <input type="number" min="0" step="0.1" class="term-liq-input" id="minLiqInput" placeholder="MIN_LIQ" value="${filterState.minLiquidity || ""}" />
+      </div>
+    </div>
+  `;
+}
+
+function applyHeaderFilters(tokens) {
+  return tokens.filter((t) => {
+    if (filterState.activeFilter === "verified" && !t.verified) return false;
+    if (filterState.activeFilter === "safu" && !t.isSafu) return false;
+    if (filterState.minLiquidity && t.baseLiquidity < filterState.minLiquidity) return false;
+    return true;
+  });
+}
+
+function renderChainSection(chainKey, chainLabel, allTokens, safuTokens, pumpWatchTokens, sniperTokens, ruggedTokens, isNewFn) {
   return `
     <section class="chain-section">
-      <h2 class="chain-title">${chainLabel}</h2>
+      ${renderTerminalHeader(chainLabel, allTokens, safuTokens, pumpWatchTokens, sniperTokens, ruggedTokens)}
       <div class="board">
         <section class="column">
           <div class="column-head">
@@ -362,12 +429,15 @@ async function loadTokens({ scanFirst } = {}) {
     const safuTokens = chainTokens.filter((t) => t.isSafu).sort(sortFn);
     const pumpWatchTokens = chainTokens.filter((t) => t.isPumpWatch).sort(sortFn);
     const sniperTokens = chainTokens.filter((t) => t.isSniperFlagged).sort(sortFn);
+    const ruggedTokens = chainTokens.filter((t) => t.ruggedFlagged);
+
     let allTokens = hideSpam
       ? chainTokens.filter((t) => t.baseLiquidity >= DUST_THRESHOLD_ETH)
       : chainTokens;
+    allTokens = applyHeaderFilters(allTokens);
     allTokens = [...allTokens].sort(sortFn);
 
-    html += renderChainSection(key, label, allTokens, safuTokens, pumpWatchTokens, sniperTokens, isNew);
+    html += renderChainSection(key, label, allTokens, safuTokens, pumpWatchTokens, sniperTokens, ruggedTokens, isNew);
   }
 
   const container = document.getElementById("chainSections");
@@ -401,6 +471,20 @@ document.getElementById("refreshBtn").addEventListener("click", async () => {
 
 document.getElementById("hideSpamToggle").addEventListener("change", () => loadTokens({ scanFirst: false }));
 document.getElementById("sortSelect").addEventListener("change", () => loadTokens({ scanFirst: false }));
+
+document.getElementById("chainSections").addEventListener("click", (e) => {
+  const chip = e.target.closest(".term-chip");
+  if (!chip) return;
+  filterState.activeFilter = chip.getAttribute("data-filter");
+  loadTokens({ scanFirst: false });
+});
+
+document.getElementById("chainSections").addEventListener("change", (e) => {
+  if (e.target.id === "minLiqInput") {
+    filterState.minLiquidity = parseFloat(e.target.value) || 0;
+    loadTokens({ scanFirst: false });
+  }
+});
 
 loadTokens({ scanFirst: true });
 setInterval(() => loadTokens({ scanFirst: false }), 60 * 1000);
