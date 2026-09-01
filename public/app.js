@@ -1,8 +1,6 @@
 const SEEN_KEY = "safu_scanner_seen_tokens";
 const DUST_THRESHOLD_ETH = 0.05;
-const CHAIN_ORDER = ["robinhood"];
-
-let filterState = { activeFilter: "all", minLiquidity: 0 };
+const CHAIN_ORDER = ["robinhood", "stable"];
 
 function formatAge(timestampMs) {
   const seconds = Math.floor((Date.now() - timestampMs) / 1000);
@@ -138,13 +136,6 @@ function sniperBadge(t) {
   return `<span class="badge ${cls}">Early buyers: ${pct.toFixed(0)}%</span>`;
 }
 
-function repeatSniperBadge(t) {
-  if (t.sniperWallets && t.sniperWallets.some((w) => w.isRepeatSniper)) {
-    return `<span class="badge badge-red">🎯 Repeat sniper wallet involved</span>`;
-  }
-  return "";
-}
-
 function pumpWatchBadge(t) {
   if (!t.isPumpWatch) return "";
   return `<span class="badge badge-amber">⚠ Deployer: ${t.deployerLaunches || 0}/${t.deployerLaunches || 0} launches hit 2x+</span>`;
@@ -178,7 +169,6 @@ function renderCard(t, isNew) {
         ${ownershipBadge(t)}
         ${deployerBadge(t)}
         ${sniperBadge(t)}
-        ${repeatSniperBadge(t)}
         ${spoofBadge(t)}
         ${pumpWatchBadge(t)}
       </div>
@@ -215,75 +205,10 @@ function attachCopyHandlers(container) {
   });
 }
 
-// Buckets tokens into hourly counts for the last `hours` hours, most recent
-// hour last, for the activity sparkline in the terminal header.
-function computeHourlyActivity(tokens, hours) {
-  const now = Date.now();
-  const buckets = new Array(hours).fill(0);
-  for (const t of tokens) {
-    const ts = t.launchedAt || t.scannedAt;
-    if (!ts) continue;
-    const hoursAgo = Math.floor((now - ts) / (60 * 60 * 1000));
-    if (hoursAgo >= 0 && hoursAgo < hours) {
-      buckets[hours - 1 - hoursAgo] += 1;
-    }
-  }
-  return buckets;
-}
-
-function renderTerminalHeader(chainLabel, allTokens, safuTokens, pumpWatchTokens, sniperTokens, ruggedTokens) {
-  const buckets = computeHourlyActivity(allTokens, 12);
-  const maxBucket = Math.max(...buckets, 1);
-  const barsHtml = buckets
-    .map((count) => {
-      const pct = count > 0 ? Math.max((count / maxBucket) * 100, 15) : 4;
-      return `<div class="term-bar" style="height:${pct}%;"></div>`;
-    })
-    .join("");
-
-  const chip = (key, label) =>
-    `<button class="term-chip ${filterState.activeFilter === key ? "term-chip-active" : ""}" data-filter="${key}">${label}</button>`;
-
-  return `
-    <div class="terminal-header">
-      <div class="terminal-topline">
-        <span class="terminal-title">◈ SAFU_SCANNER // ${chainLabel.toUpperCase().replace(/ /g, "_")}</span>
-        <span class="terminal-live">LIVE</span>
-      </div>
-      <div class="terminal-stats-row">
-        <div class="terminal-stat"><span class="terminal-stat-label">SCANNED</span><span class="terminal-stat-value">${allTokens.length}</span></div>
-        <div class="terminal-stat"><span class="terminal-stat-label">SAFU</span><span class="terminal-stat-value terminal-green">${safuTokens.length}</span></div>
-        <div class="terminal-stat"><span class="terminal-stat-label">PUMP_WATCH</span><span class="terminal-stat-value terminal-amber">${pumpWatchTokens.length}</span></div>
-        <div class="terminal-stat"><span class="terminal-stat-label">SNIPERS</span><span class="terminal-stat-value terminal-amber">${sniperTokens.length}</span></div>
-        <div class="terminal-stat"><span class="terminal-stat-label">RUGGED</span><span class="terminal-stat-value terminal-red">${ruggedTokens.length}</span></div>
-      </div>
-      <div class="terminal-activity-row">
-        <span class="terminal-activity-label">12H_ACTIVITY</span>
-        <div class="terminal-bars">${barsHtml}</div>
-      </div>
-      <div class="terminal-chip-row">
-        ${chip("all", "ALL")}
-        ${chip("verified", "VERIFIED")}
-        ${chip("safu", "SAFU")}
-        <input type="number" min="0" step="0.1" class="term-liq-input" id="minLiqInput" placeholder="MIN_LIQ" value="${filterState.minLiquidity || ""}" />
-      </div>
-    </div>
-  `;
-}
-
-function applyHeaderFilters(tokens) {
-  return tokens.filter((t) => {
-    if (filterState.activeFilter === "verified" && !t.verified) return false;
-    if (filterState.activeFilter === "safu" && !t.isSafu) return false;
-    if (filterState.minLiquidity && t.baseLiquidity < filterState.minLiquidity) return false;
-    return true;
-  });
-}
-
-function renderChainSection(chainKey, chainLabel, allTokens, safuTokens, pumpWatchTokens, sniperTokens, ruggedTokens, isNewFn) {
+function renderChainSection(chainKey, chainLabel, allTokens, safuTokens, pumpWatchTokens, isNewFn) {
   return `
     <section class="chain-section">
-      ${renderTerminalHeader(chainLabel, allTokens, safuTokens, pumpWatchTokens, sniperTokens, ruggedTokens)}
+      <h2 class="chain-title">${chainLabel}</h2>
       <div class="board">
         <section class="column">
           <div class="column-head">
@@ -320,63 +245,8 @@ function renderChainSection(chainKey, chainLabel, allTokens, safuTokens, pumpWat
             : `<p class="column-empty">No repeat pump-then-rug patterns detected yet.</p>`}
         </div>
       </div>
-      <div class="sniper-section">
-        <div class="column-head">
-          <h3>🎯 Snipers <span class="column-sub">heavy early-buyer concentration, or a wallet flagged as a repeat sniper across multiple launches</span></h3>
-          <span class="count-pill">${sniperTokens.length}</span>
-        </div>
-        <p class="disclaimer">High early concentration isn't automatically malicious, but it's worth knowing who got in first and how much of supply they hold.</p>
-        <div class="card-list">
-          ${sniperTokens.length
-            ? sniperTokens.map((t) => renderCard(t, isNewFn(t))).join("")
-            : `<p class="column-empty">No sniper-heavy launches detected yet.</p>`}
-        </div>
-      </div>
     </section>
   `;
-}
-
-function renderRepeatSnipers(repeatSnipers) {
-  if (!repeatSnipers.length) {
-    return `
-      <section class="repeat-snipers-section">
-        <div class="column-head">
-          <h2>🎯 Repeat Snipers <span class="column-sub">wallets seen as early buyers across multiple different launches, any chain</span></h2>
-          <span class="count-pill">0</span>
-        </div>
-        <p class="column-empty">No repeat-sniper wallets identified yet.</p>
-      </section>
-    `;
-  }
-  const rows = repeatSnipers
-    .map(
-      (s) => `
-    <div class="sniper-wallet-row">
-      <span class="token-addr">${s.wallet}</span>
-      <button class="copy-btn" data-addr="${s.wallet}">Copy</button>
-      <span class="badge badge-amber">${s.launchesCount} launches</span>
-    </div>`
-    )
-    .join("");
-  return `
-    <section class="repeat-snipers-section">
-      <div class="column-head">
-        <h2>🎯 Repeat Snipers <span class="column-sub">wallets seen as early buyers across multiple different launches, any chain</span></h2>
-        <span class="count-pill">${repeatSnipers.length}</span>
-      </div>
-      <div class="sniper-wallet-list">${rows}</div>
-    </section>
-  `;
-}
-
-function ensureRepeatSnipersContainer() {
-  let el = document.getElementById("repeatSnipersSection");
-  if (!el) {
-    el = document.createElement("div");
-    el.id = "repeatSnipersSection";
-    document.getElementById("chainSections").insertAdjacentElement("beforebegin", el);
-  }
-  return el;
 }
 
 async function loadTokens({ scanFirst } = {}) {
@@ -390,12 +260,8 @@ async function loadTokens({ scanFirst } = {}) {
     }
   }
 
-  const [tokensRes, snipersRes] = await Promise.all([
-    fetch("/api/tokens"),
-    fetch("/api/snipers"),
-  ]);
-  const tokens = await tokensRes.json();
-  const repeatSnipers = await snipersRes.json();
+  const res = await fetch("/api/tokens");
+  const tokens = await res.json();
 
   const hideSpam = document.getElementById("hideSpamToggle").checked;
   const sortBy = document.getElementById("sortSelect").value;
@@ -428,25 +294,17 @@ async function loadTokens({ scanFirst } = {}) {
     const { label, tokens: chainTokens } = byChain.get(key);
     const safuTokens = chainTokens.filter((t) => t.isSafu).sort(sortFn);
     const pumpWatchTokens = chainTokens.filter((t) => t.isPumpWatch).sort(sortFn);
-    const sniperTokens = chainTokens.filter((t) => t.isSniperFlagged).sort(sortFn);
-    const ruggedTokens = chainTokens.filter((t) => t.ruggedFlagged);
-
     let allTokens = hideSpam
       ? chainTokens.filter((t) => t.baseLiquidity >= DUST_THRESHOLD_ETH)
       : chainTokens;
-    allTokens = applyHeaderFilters(allTokens);
     allTokens = [...allTokens].sort(sortFn);
 
-    html += renderChainSection(key, label, allTokens, safuTokens, pumpWatchTokens, sniperTokens, ruggedTokens, isNew);
+    html += renderChainSection(key, label, allTokens, safuTokens, pumpWatchTokens, isNew);
   }
 
   const container = document.getElementById("chainSections");
   container.innerHTML = html || `<p class="column-empty">No chains have data yet.</p>`;
   attachCopyHandlers(container);
-
-  const repeatSnipersContainer = ensureRepeatSnipersContainer();
-  repeatSnipersContainer.innerHTML = renderRepeatSnipers(repeatSnipers);
-  attachCopyHandlers(repeatSnipersContainer);
 
   tokens.forEach((t) => seen.add(`${t.chain}:${t.tokenAddress}`));
   saveSeenAddresses(seen);
@@ -471,20 +329,6 @@ document.getElementById("refreshBtn").addEventListener("click", async () => {
 
 document.getElementById("hideSpamToggle").addEventListener("change", () => loadTokens({ scanFirst: false }));
 document.getElementById("sortSelect").addEventListener("change", () => loadTokens({ scanFirst: false }));
-
-document.getElementById("chainSections").addEventListener("click", (e) => {
-  const chip = e.target.closest(".term-chip");
-  if (!chip) return;
-  filterState.activeFilter = chip.getAttribute("data-filter");
-  loadTokens({ scanFirst: false });
-});
-
-document.getElementById("chainSections").addEventListener("change", (e) => {
-  if (e.target.id === "minLiqInput") {
-    filterState.minLiquidity = parseFloat(e.target.value) || 0;
-    loadTokens({ scanFirst: false });
-  }
-});
 
 loadTokens({ scanFirst: true });
 setInterval(() => loadTokens({ scanFirst: false }), 60 * 1000);
