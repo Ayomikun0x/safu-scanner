@@ -109,12 +109,6 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Fetches logs in chunks, retrying each chunk once on a transient failure
-// (timeouts, 503s, rate limits) before giving up on it. Chains with very
-// small chunk sizes (like Robinhood's 10-block chunks, forced by its RPC's
-// eth_getLogs range cap) fire far more requests per scan, so a brief pause
-// between chunks avoids bursting a fresh API key's rate limit -- larger
-// chunk sizes already mean few enough calls that this isn't needed.
 async function getLogsChunked(contract, eventFilter, fromBlock, toBlock, chunkSize = DEFAULT_LOG_CHUNK_SIZE) {
   const allLogs = [];
   let start = fromBlock;
@@ -441,24 +435,6 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
     if (priceUsd !== null) marketCapUsd = priceUsd * totalSupplyFormatted;
   }
 
-  const topHolderOk =
-    topHolderRaw.available === false ? true : topHolderRaw.pct !== null && topHolderRaw.pct < config.safuMaxDeployerPct;
-  const ownershipOk = ownershipRenounced !== false;
-  const deployerOk = deployerRecord.ruggedCount === 0;
-  const snipingOk = earlySnipers.pct === null ? true : earlySnipers.pct < config.safuMaxEarlyConcentrationPct;
-
-  const isSafu =
-    verification.verified === true &&
-    verification.riskyFunctions.length === 0 &&
-    !isProxy &&
-    topHolderOk &&
-    baseLiquidityFormatted >= config.safuMinLiquidityEth &&
-    nameOk && symbolOk && !spoofedIdentity &&
-    isLpTrulyLocked(lpLock.status) &&
-    ownershipOk &&
-    deployerOk &&
-    snipingOk;
-
   const isPumpWatch =
     deployerRecord.totalLaunches >= config.pumpWatchMinLaunches &&
     deployerRecord.hit2xCount === deployerRecord.totalLaunches &&
@@ -500,7 +476,6 @@ async function analyzeNewToken(network, newTokenAddress, baseTokenAddress, poolA
     earlySniperWallets: earlySnipers.wallets,
     sniperWallets,
     isSniperFlagged,
-    isSafu,
     isPumpWatch,
     pumpWatchAlertedAt: null,
     needsRecheck: rateLimitedAny,
@@ -628,36 +603,6 @@ async function refreshKnownTokenPrices(network) {
           updatedRecord.deployerRuggedCount = deployerRecord.ruggedCount;
           updatedRecord.deployerHit2xCount = deployerRecord.hit2xCount;
 
-          const topHolderOk =
-            updatedRecord.topHolderDataAvailable === false
-              ? true
-              : updatedRecord.topHolderPct !== null && updatedRecord.topHolderPct < config.safuMaxDeployerPct;
-          const ownershipOk = updatedRecord.ownershipRenounced !== false;
-          const deployerOk = deployerRecord.ruggedCount === 0;
-          const snipingOk =
-            updatedRecord.earlySniperPct === null || updatedRecord.earlySniperPct === undefined
-              ? true
-              : updatedRecord.earlySniperPct < config.safuMaxEarlyConcentrationPct;
-
-          const newIsSafu =
-            updatedRecord.verified === true &&
-            updatedRecord.riskyFunctions.length === 0 &&
-            !updatedRecord.isProxy &&
-            topHolderOk &&
-            baseLiquidityFormatted >= config.safuMinLiquidityEth &&
-            updatedRecord.nameOk !== false &&
-            updatedRecord.symbolOk !== false &&
-            !updatedRecord.spoofedIdentity &&
-            isLpTrulyLocked(updatedRecord.lpLockStatus) &&
-            ownershipOk && deployerOk && snipingOk;
-
-          updatedRecord.isSafu = newIsSafu;
-
-          if (newIsSafu && !record.isSafu && !record.alertedAt) {
-            updatedRecord.alertedAt = Date.now();
-            telegram.sendSafuAlert(updatedRecord);
-          }
-
           const newIsPumpWatch =
             deployerRecord.totalLaunches >= config.pumpWatchMinLaunches &&
             deployerRecord.hit2xCount === deployerRecord.totalLaunches &&
@@ -688,10 +633,6 @@ async function processCandidate(network, candidate) {
   const tokenKey = `${record.chain}:${record.tokenAddress}`;
   if (record.deployerAddress) db.recordDeployerLaunch(record.deployerAddress, tokenKey);
 
-  if (record.isSafu) {
-    record.alertedAt = Date.now();
-    telegram.sendSafuAlert(record);
-  }
   if (record.isPumpWatch) {
     record.pumpWatchAlertedAt = Date.now();
     telegram.sendPumpWatchAlert(record);
