@@ -4,7 +4,6 @@ const session = require("express-session");
 const config = require("./config");
 const db = require("./db");
 const { scanOnce, forceResetScanLock } = require("./scanner");
-const { startRobinhoodListener } = require("./robinhoodListener");
 const { computeStats } = require("./utils/stats");
 const { withTimeout } = require("./utils/withTimeout");
 const app = express();
@@ -84,7 +83,7 @@ async function runScanLoop() {
     const result = await withTimeout(scanOnce(), 6 * 60 * 1000, "scanOnce");
     const durationSec = ((Date.now() - startedAt) / 1000).toFixed(1);
     console.log(`Scan complete in ${durationSec}s: ${result.scanned} pools checked, ${result.newTokens} new tokens recorded`);
-} catch (err) {
+  } catch (err) {
     const durationSec = ((Date.now() - startedAt) / 1000).toFixed(1);
     console.error(`Scheduled scan failed after ${durationSec}s:`, err.message);
     if (err.message.includes("timed out")) {
@@ -104,5 +103,4 @@ app.listen(config.port, () => {
   // approach turned out to be unsupported for this chain (connects, but
   // never delivers events), so it's disabled to stop wasting API calls
   // on constant reconnect attempts.
-});
 });
