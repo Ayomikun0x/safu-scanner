@@ -99,12 +99,10 @@ async function runScanLoop() {
 app.listen(config.port, () => {
   console.log(`SAFU Scanner running on port ${config.port}`);
   runScanLoop();
-  // Robinhood Chain's new-pool discovery runs over a live WebSocket
-  // subscription (see robinhoodListener.js) instead of block-range polling,
-  // since the RPC's eth_getLogs range cap makes polling for ~1200-block
-  // windows every cycle unworkable. This starts once at boot and
-  // reconnects on its own if the socket drops.
-  startRobinhoodListener().catch((err) => {
-    console.error("Failed to start Robinhood WebSocket listener:", err.message);
-  });
+  // Robinhood Chain's new-pool discovery now runs entirely through
+  // block-range polling (see scanner.js) -- the WebSocket subscription
+  // approach turned out to be unsupported for this chain (connects, but
+  // never delivers events), so it's disabled to stop wasting API calls
+  // on constant reconnect attempts.
+});
 });
