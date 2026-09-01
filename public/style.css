@@ -484,3 +484,134 @@ main {
   .topbar { flex-direction: column; align-items: flex-start; gap: 12px; }
   .board { flex-direction: column; }
 }
+.terminal-header {
+  background: #0b0d10;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  font-family: var(--mono);
+}
+
+.terminal-topline {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+}
+
+.terminal-title {
+  color: var(--text);
+  font-size: 12.5px;
+  letter-spacing: 0.04em;
+}
+
+.terminal-live {
+  color: var(--green);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+}
+
+.terminal-stats-row {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+
+.terminal-stat {
+  flex: 1;
+  padding: 7px 10px;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.terminal-stat:last-child {
+  border-right: none;
+}
+
+.terminal-stat-label {
+  color: var(--gray);
+  font-size: 9.5px;
+  letter-spacing: 0.03em;
+}
+
+.terminal-stat-value {
+  color: var(--text);
+  font-size: 15px;
+}
+
+.terminal-green { color: var(--green); }
+.terminal-amber { color: var(--amber); }
+.terminal-red { color: var(--red); }
+
+.terminal-activity-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.terminal-activity-label {
+  color: var(--gray);
+  font-size: 9.5px;
+}
+
+.terminal-bars {
+  flex: 1;
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 16px;
+}
+
+.term-bar {
+  flex: 1;
+  background: var(--accent);
+  opacity: 0.85;
+  border-radius: 1px 1px 0 0;
+}
+
+.terminal-chip-row {
+  display: flex;
+  gap: 0;
+  align-items: center;
+}
+
+.term-chip {
+  background: none;
+  color: var(--gray);
+  border: 1px solid var(--border);
+  border-left: none;
+  padding: 4px 10px;
+  font-size: 10.5px;
+  font-family: var(--mono);
+  cursor: pointer;
+}
+
+.term-chip:first-child {
+  border-left: 1px solid var(--border);
+  border-radius: 3px 0 0 3px;
+}
+
+.term-chip-active {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.term-liq-input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  padding: 4px 8px;
+  width: 90px;
+  border-radius: 0 3px 3px 0;
+  margin-left: 4px;
+}
