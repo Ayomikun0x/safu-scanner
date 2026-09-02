@@ -2,7 +2,16 @@ const SEEN_KEY = "safu_scanner_seen_tokens";
 const DUST_THRESHOLD_ETH = 0.05;
 const CHAIN_ORDER = ["robinhood"];
 
-let filterState = { activeFilter: "all", minLiquidity: 0 };
+const FILTER_CHIPS = [
+  { key: "verified", label: "VERIFIED", test: (t) => t.verified === true },
+  { key: "lpLocked", label: "LP_LOCKED", test: (t) => t.lpLockStatus === "locked" || t.lpLockStatus === "burned" },
+  { key: "ownerRenounced", label: "OWNER_RENOUNCED", test: (t) => t.ownershipRenounced === true },
+  { key: "noRiskyFns", label: "NO_RISKY_FNS", test: (t) => !t.riskyFunctions || t.riskyFunctions.length === 0 },
+  { key: "cleanDeployer", label: "CLEAN_DEPLOYER", test: (t) => (t.deployerRuggedCount || 0) === 0 },
+  { key: "noRepeatSniper", label: "NO_REPEAT_SNIPER", test: (t) => !(t.sniperWallets && t.sniperWallets.some((w) => w.isRepeatSniper)) },
+];
+
+let filterState = { active: new Set(), minLiquidity: 0 };
 
 function formatAge(timestampMs) {
   const seconds = Math.floor((Date.now() - timestampMs) / 1000);
@@ -239,8 +248,10 @@ function renderTerminalHeader(chainLabel, allTokens, pumpWatchTokens, sniperToke
     })
     .join("");
 
-  const chip = (key, label) =>
-    `<button class="term-chip ${filterState.activeFilter === key ? "term-chip-active" : ""}" data-filter="${key}">${label}</button>`;
+  const chipsHtml = FILTER_CHIPS.map(
+    (c) =>
+      `<button class="term-chip ${filterState.active.has(c.key) ? "term-chip-active" : ""}" data-filter-key="${c.key}">${c.label}</button>`
+  ).join("");
 
   return `
     <div class="terminal-header">
@@ -259,8 +270,7 @@ function renderTerminalHeader(chainLabel, allTokens, pumpWatchTokens, sniperToke
         <div class="terminal-bars">${barsHtml}</div>
       </div>
       <div class="terminal-chip-row">
-        ${chip("all", "ALL")}
-        ${chip("verified", "VERIFIED")}
+        ${chipsHtml}
         <input type="number" min="0" step="0.1" class="term-liq-input" id="minLiqInput" placeholder="MIN_LIQ" value="${filterState.minLiquidity || ""}" />
       </div>
     </div>
@@ -269,7 +279,9 @@ function renderTerminalHeader(chainLabel, allTokens, pumpWatchTokens, sniperToke
 
 function applyHeaderFilters(tokens) {
   return tokens.filter((t) => {
-    if (filterState.activeFilter === "verified" && !t.verified) return false;
+    for (const c of FILTER_CHIPS) {
+      if (filterState.active.has(c.key) && !c.test(t)) return false;
+    }
     if (filterState.minLiquidity && t.baseLiquidity < filterState.minLiquidity) return false;
     return true;
   });
@@ -288,7 +300,7 @@ function renderChainSection(chainKey, chainLabel, allTokens, pumpWatchTokens, sn
           <div class="card-list">
             ${allTokens.length
               ? allTokens.map((t) => renderCard(t, isNewFn(t))).join("")
-              : `<p class="column-empty">Nothing scanned yet.</p>`}
+              : `<p class="column-empty">Nothing matches the current filters.</p>`}
           </div>
         </section>
       </div>
@@ -458,7 +470,12 @@ document.getElementById("sortSelect").addEventListener("change", () => loadToken
 document.getElementById("chainSections").addEventListener("click", (e) => {
   const chip = e.target.closest(".term-chip");
   if (!chip) return;
-  filterState.activeFilter = chip.getAttribute("data-filter");
+  const key = chip.getAttribute("data-filter-key");
+  if (filterState.active.has(key)) {
+    filterState.active.delete(key);
+  } else {
+    filterState.active.add(key);
+  }
   loadTokens({ scanFirst: false });
 });
 
