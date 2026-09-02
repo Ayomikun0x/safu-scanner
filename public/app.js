@@ -152,7 +152,7 @@ function pumpWatchBadge(t) {
 
 function renderCard(t, isNew) {
   return `
-    <div class="token-card ${t.isSafu ? "is-safu" : ""}">
+    <div class="token-card">
       <div class="card-top">
         <span>
           <span class="token-name">${t.name}</span><span class="token-symbol">${t.symbol}</span>
@@ -229,7 +229,7 @@ function computeHourlyActivity(tokens, hours) {
   return buckets;
 }
 
-function renderTerminalHeader(chainLabel, allTokens, safuTokens, pumpWatchTokens, sniperTokens, ruggedTokens) {
+function renderTerminalHeader(chainLabel, allTokens, pumpWatchTokens, sniperTokens, ruggedTokens) {
   const buckets = computeHourlyActivity(allTokens, 12);
   const maxBucket = Math.max(...buckets, 1);
   const barsHtml = buckets
@@ -250,7 +250,6 @@ function renderTerminalHeader(chainLabel, allTokens, safuTokens, pumpWatchTokens
       </div>
       <div class="terminal-stats-row">
         <div class="terminal-stat"><span class="terminal-stat-label">SCANNED</span><span class="terminal-stat-value">${allTokens.length}</span></div>
-        <div class="terminal-stat"><span class="terminal-stat-label">SAFU</span><span class="terminal-stat-value terminal-green">${safuTokens.length}</span></div>
         <div class="terminal-stat"><span class="terminal-stat-label">PUMP_WATCH</span><span class="terminal-stat-value terminal-amber">${pumpWatchTokens.length}</span></div>
         <div class="terminal-stat"><span class="terminal-stat-label">SNIPERS</span><span class="terminal-stat-value terminal-amber">${sniperTokens.length}</span></div>
         <div class="terminal-stat"><span class="terminal-stat-label">RUGGED</span><span class="terminal-stat-value terminal-red">${ruggedTokens.length}</span></div>
@@ -262,7 +261,6 @@ function renderTerminalHeader(chainLabel, allTokens, safuTokens, pumpWatchTokens
       <div class="terminal-chip-row">
         ${chip("all", "ALL")}
         ${chip("verified", "VERIFIED")}
-        ${chip("safu", "SAFU")}
         <input type="number" min="0" step="0.1" class="term-liq-input" id="minLiqInput" placeholder="MIN_LIQ" value="${filterState.minLiquidity || ""}" />
       </div>
     </div>
@@ -272,16 +270,15 @@ function renderTerminalHeader(chainLabel, allTokens, safuTokens, pumpWatchTokens
 function applyHeaderFilters(tokens) {
   return tokens.filter((t) => {
     if (filterState.activeFilter === "verified" && !t.verified) return false;
-    if (filterState.activeFilter === "safu" && !t.isSafu) return false;
     if (filterState.minLiquidity && t.baseLiquidity < filterState.minLiquidity) return false;
     return true;
   });
 }
 
-function renderChainSection(chainKey, chainLabel, allTokens, safuTokens, pumpWatchTokens, sniperTokens, ruggedTokens, isNewFn) {
+function renderChainSection(chainKey, chainLabel, allTokens, pumpWatchTokens, sniperTokens, ruggedTokens, isNewFn) {
   return `
     <section class="chain-section">
-      ${renderTerminalHeader(chainLabel, allTokens, safuTokens, pumpWatchTokens, sniperTokens, ruggedTokens)}
+      ${renderTerminalHeader(chainLabel, allTokens, pumpWatchTokens, sniperTokens, ruggedTokens)}
       <div class="board">
         <section class="column">
           <div class="column-head">
@@ -292,17 +289,6 @@ function renderChainSection(chainKey, chainLabel, allTokens, safuTokens, pumpWat
             ${allTokens.length
               ? allTokens.map((t) => renderCard(t, isNewFn(t))).join("")
               : `<p class="column-empty">Nothing scanned yet.</p>`}
-          </div>
-        </section>
-        <section class="column">
-          <div class="column-head">
-            <h3>SAFU <span class="column-sub">verified · no risky fns · not upgradeable · &lt;5% top holder · min liquidity · LP locked · ownership renounced · clean deployer · no sniping</span></h3>
-            <span class="count-pill count-pill-green">${safuTokens.length}</span>
-          </div>
-          <div class="card-list">
-            ${safuTokens.length
-              ? safuTokens.map((t) => renderCard(t, isNewFn(t))).join("")
-              : `<p class="column-empty">None have passed the filter yet.</p>`}
           </div>
         </section>
       </div>
@@ -424,7 +410,6 @@ async function loadTokens({ scanFirst } = {}) {
   let html = "";
   for (const key of chainKeys) {
     const { label, tokens: chainTokens } = byChain.get(key);
-    const safuTokens = chainTokens.filter((t) => t.isSafu).sort(sortFn);
     const pumpWatchTokens = chainTokens.filter((t) => t.isPumpWatch).sort(sortFn);
     const sniperTokens = chainTokens.filter((t) => t.isSniperFlagged).sort(sortFn);
     const ruggedTokens = chainTokens.filter((t) => t.ruggedFlagged);
@@ -435,7 +420,7 @@ async function loadTokens({ scanFirst } = {}) {
     allTokens = applyHeaderFilters(allTokens);
     allTokens = [...allTokens].sort(sortFn);
 
-    html += renderChainSection(key, label, allTokens, safuTokens, pumpWatchTokens, sniperTokens, ruggedTokens, isNew);
+    html += renderChainSection(key, label, allTokens, pumpWatchTokens, sniperTokens, ruggedTokens, isNew);
   }
 
   const container = document.getElementById("chainSections");
